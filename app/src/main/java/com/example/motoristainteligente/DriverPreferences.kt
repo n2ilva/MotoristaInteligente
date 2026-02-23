@@ -17,6 +17,9 @@ import android.content.SharedPreferences
  */
 class DriverPreferences(context: Context) {
 
+    /** Referência opcional ao FirestoreManager para sync automático */
+    var firestoreManager: FirestoreManager? = null
+
     companion object {
         private const val PREFS_NAME = "driver_preferences"
 
@@ -27,11 +30,27 @@ class DriverPreferences(context: Context) {
         private const val KEY_MAX_RIDE_DISTANCE = "max_ride_distance"
         private const val KEY_FIRST_SETUP_DONE = "first_setup_done"
 
+        // Vehicle keys
+        private const val KEY_VEHICLE_TYPE = "vehicle_type"          // "combustion" | "electric"
+        private const val KEY_FUEL_TYPE = "fuel_type"                // "gasoline" | "ethanol"
+        private const val KEY_KM_PER_LITER_GASOLINE = "km_per_liter_gasoline"
+        private const val KEY_KM_PER_LITER_ETHANOL = "km_per_liter_ethanol"
+        private const val KEY_GASOLINE_PRICE = "gasoline_price"
+        private const val KEY_ETHANOL_PRICE = "ethanol_price"
+
         // Defaults
         const val DEFAULT_MIN_PRICE_PER_KM = 1.50
         const val DEFAULT_MIN_EARNINGS_PER_HOUR = 20.0
         const val DEFAULT_MAX_PICKUP_DISTANCE = 5.0
         const val DEFAULT_MAX_RIDE_DISTANCE = 50.0  // Desativado por padrão (valor alto)
+
+        // Vehicle defaults
+        const val DEFAULT_VEHICLE_TYPE = "combustion"
+        const val DEFAULT_FUEL_TYPE = "gasoline"
+        const val DEFAULT_KM_PER_LITER_GASOLINE = 10.0
+        const val DEFAULT_KM_PER_LITER_ETHANOL = 7.0
+        const val DEFAULT_GASOLINE_PRICE = 6.00
+        const val DEFAULT_ETHANOL_PRICE = 4.00
 
         // Limites para validação
         const val MIN_PRICE_PER_KM_FLOOR = 0.50
@@ -89,6 +108,73 @@ class DriverPreferences(context: Context) {
         set(value) = prefs.edit().putBoolean(KEY_FIRST_SETUP_DONE, value).apply()
 
     // ========================
+    // Dados do Veículo
+    // ========================
+
+    /** Tipo do veículo: "combustion" ou "electric" */
+    var vehicleType: String
+        get() = prefs.getString(KEY_VEHICLE_TYPE, DEFAULT_VEHICLE_TYPE) ?: DEFAULT_VEHICLE_TYPE
+        set(value) = prefs.edit().putString(KEY_VEHICLE_TYPE, value).apply()
+
+    /** Tipo de combustível preferido: "gasoline" ou "ethanol" */
+    var fuelType: String
+        get() = prefs.getString(KEY_FUEL_TYPE, DEFAULT_FUEL_TYPE) ?: DEFAULT_FUEL_TYPE
+        set(value) = prefs.edit().putString(KEY_FUEL_TYPE, value).apply()
+
+    /** Km por litro com gasolina */
+    var kmPerLiterGasoline: Double
+        get() = prefs.getFloat(KEY_KM_PER_LITER_GASOLINE, DEFAULT_KM_PER_LITER_GASOLINE.toFloat()).toDouble()
+        set(value) = prefs.edit().putFloat(KEY_KM_PER_LITER_GASOLINE, value.coerceIn(3.0, 30.0).toFloat()).apply()
+
+    /** Km por litro com etanol */
+    var kmPerLiterEthanol: Double
+        get() = prefs.getFloat(KEY_KM_PER_LITER_ETHANOL, DEFAULT_KM_PER_LITER_ETHANOL.toFloat()).toDouble()
+        set(value) = prefs.edit().putFloat(KEY_KM_PER_LITER_ETHANOL, value.coerceIn(2.0, 25.0).toFloat()).apply()
+
+    /** Preço da gasolina (R$/L) */
+    var gasolinePrice: Double
+        get() = prefs.getFloat(KEY_GASOLINE_PRICE, DEFAULT_GASOLINE_PRICE.toFloat()).toDouble()
+        set(value) = prefs.edit().putFloat(KEY_GASOLINE_PRICE, value.coerceIn(2.0, 12.0).toFloat()).apply()
+
+    /** Preço do etanol (R$/L) */
+    var ethanolPrice: Double
+        get() = prefs.getFloat(KEY_ETHANOL_PRICE, DEFAULT_ETHANOL_PRICE.toFloat()).toDouble()
+        set(value) = prefs.edit().putFloat(KEY_ETHANOL_PRICE, value.coerceIn(1.5, 9.0).toFloat()).apply()
+
+    /** Custo por km do combustível atual */
+    val fuelCostPerKm: Double
+        get() {
+            if (vehicleType == "electric") return 0.10  // ~R$0.10/km elétrico estimado
+            return if (fuelType == "gasoline") {
+                gasolinePrice / kmPerLiterGasoline
+            } else {
+                ethanolPrice / kmPerLiterEthanol
+            }
+        }
+
+    /** Custo por km da gasolina */
+    val gasolineCostPerKm: Double get() = gasolinePrice / kmPerLiterGasoline
+
+    /** Custo por km do etanol */
+    val ethanolCostPerKm: Double get() = ethanolPrice / kmPerLiterEthanol
+
+    /** Indica se etanol compensa (regra: etanol < 70% gasolina ou custo/km menor) */
+    val isEthanolBetter: Boolean get() = ethanolCostPerKm < gasolineCostPerKm
+
+    /** Combustível recomendado */
+    val recommendedFuel: String get() = if (isEthanolBetter) "ethanol" else "gasoline"
+
+    /** Valor mínimo sugerido para aceitar corrida (cobre combustível + margem) */
+    fun suggestedMinPricePerKm(avgRideKm: Double = 8.0): Double {
+        val fuel = fuelCostPerKm
+        val maintenance = 0.08  // R$0.08/km manutenção estimada
+        val depreciacao = 0.07  // R$0.07/km depreciação estimada
+        val totalCost = fuel + maintenance + depreciacao
+        // Margem de ~50% sobre custo (cobre impostos + lucro)
+        return totalCost * 1.5
+    }
+
+    // ========================
     // Helpers
     // ========================
 
@@ -102,6 +188,8 @@ class DriverPreferences(context: Context) {
             newMinHourly = minEarningsPerHour
         )
         RideAnalyzer.updatePickupLimit(maxPickupDistance, maxRideDistance)
+        // Sync com Firestore
+        firestoreManager?.savePreferences(this)
     }
 
     /**

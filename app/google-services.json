@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "742389314956",
+    "project_id": "motoristainteligente-2b162",
+    "storage_bucket": "motoristainteligente-2b162.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:742389314956:android:e2d01f457032fa529e92a9",
+        "android_client_info": {
+          "package_name": "com.example.motoristainteligente"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "742389314956-kbdu2kajfdfiitbeetekdrcikomgj07g.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDRE8X01Yr-HNyPjyy2yefD_zisilMEW50"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "742389314956-kbdu2kajfdfiitbeetekdrcikomgj07g.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

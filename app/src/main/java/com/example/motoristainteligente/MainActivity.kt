@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -40,15 +41,28 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccessTime
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Analytics
+import androidx.compose.material.icons.filled.AttachMoney
 import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.DirectionsCar
+import androidx.compose.material.icons.filled.ElectricCar
+import androidx.compose.material.icons.filled.EvStation
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Lightbulb
+import androidx.compose.material.icons.filled.LocalGasStation
+import androidx.compose.material.icons.filled.LocalOffer
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.MonetizationOn
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.ShowChart
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -106,9 +120,7 @@ import kotlinx.coroutines.launch
 enum class Screen(val title: String, val icon: ImageVector) {
     HOME("Início", Icons.Default.Home),
     RIDE_SETTINGS("Configurar Corrida", Icons.Default.Settings),
-    DAILY_ANALYTICS("Análise do Dia", Icons.Default.Analytics),
-    WEEKLY_COMPARISON("Comparação Semanal", Icons.Default.CalendarMonth),
-    RIDE_HISTORY("Histórico de Corridas", Icons.Default.History),
+    WEEKLY_COMPARISON("Resumo Semanal", Icons.Default.CalendarMonth),
     PERMISSIONS("Permissões", Icons.Default.Lock),
     TIPS("Dicas de Uso", Icons.Default.Lightbulb),
     LOGIN("Login", Icons.Default.Person)
@@ -253,6 +265,11 @@ fun AppWithDrawer(
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     var currentScreen by remember { mutableStateOf(Screen.HOME) }
+    val context = LocalContext.current
+    val firestoreManager = remember { FirestoreManager(context) }
+
+    // Forçar recomposição quando estado de auth muda
+    var authRefresh by remember { mutableStateOf(0) }
 
     // Back button: fechar drawer > voltar para HOME > sair do app
     val activity = LocalContext.current as? Activity
@@ -272,7 +289,9 @@ fun AppWithDrawer(
                 onScreenSelected = { screen ->
                     currentScreen = screen
                     scope.launch { drawerState.close() }
-                }
+                },
+                firestoreManager = firestoreManager,
+                authRefresh = authRefresh
             )
         }
     ) {
@@ -295,8 +314,8 @@ fun AppWithDrawer(
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer,
-                        titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                        containerColor = MaterialTheme.colorScheme.background,
+                        titleContentColor = MaterialTheme.colorScheme.onBackground
                     )
                 )
             }
@@ -314,16 +333,17 @@ fun AppWithDrawer(
                         onNavigateToPermissions = { currentScreen = Screen.PERMISSIONS }
                     )
                     Screen.RIDE_SETTINGS -> RideSettingsScreen()
-                    Screen.DAILY_ANALYTICS -> DailyAnalyticsScreen()
                     Screen.WEEKLY_COMPARISON -> WeeklyComparisonScreen()
-                    Screen.RIDE_HISTORY -> RideHistoryScreen()
                     Screen.PERMISSIONS -> PermissionsScreen(
                         onRequestOverlayPermission = onRequestOverlayPermission,
                         onOpenAccessibilitySettings = onOpenAccessibilitySettings,
                         onRequestLocationPermission = onRequestLocationPermission
                     )
                     Screen.TIPS -> TipsScreen()
-                    Screen.LOGIN -> LoginScreen()
+                    Screen.LOGIN -> LoginScreen(
+                        firestoreManager = firestoreManager,
+                        onLoginSuccess = { authRefresh++ }
+                    )
                 }
             }
         }
@@ -336,7 +356,9 @@ fun AppWithDrawer(
 @Composable
 fun DrawerContent(
     currentScreen: Screen,
-    onScreenSelected: (Screen) -> Unit
+    onScreenSelected: (Screen) -> Unit,
+    firestoreManager: FirestoreManager? = null,
+    @Suppress("UNUSED_PARAMETER") authRefresh: Int = 0
 ) {
     ModalDrawerSheet(
         modifier = Modifier.width(300.dp)
@@ -369,7 +391,10 @@ fun DrawerContent(
                     Spacer(modifier = Modifier.height(12.dp))
 
                     Text(
-                        text = "Motorista Inteligente",
+                        text = if (firestoreManager?.isGoogleUser == true)
+                            firestoreManager.displayName ?: "Motorista"
+                        else
+                            "Motorista Inteligente",
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onPrimaryContainer
@@ -378,9 +403,14 @@ fun DrawerContent(
                     Spacer(modifier = Modifier.height(4.dp))
 
                     Text(
-                        text = "Faça login para sincronizar",
+                        text = if (firestoreManager?.isGoogleUser == true)
+                            firestoreManager.email ?: "Conta Google conectada"
+                        else
+                            "Faça login para sincronizar",
                         fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
@@ -401,9 +431,7 @@ fun DrawerContent(
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
                 modifier = Modifier.padding(start = 28.dp, top = 8.dp, bottom = 4.dp)
             )
-            DrawerMenuItem(Screen.DAILY_ANALYTICS, currentScreen, onScreenSelected)
             DrawerMenuItem(Screen.WEEKLY_COMPARISON, currentScreen, onScreenSelected)
-            DrawerMenuItem(Screen.RIDE_HISTORY, currentScreen, onScreenSelected)
 
             HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
 
@@ -518,17 +546,6 @@ fun HomeScreen(
         }
 
         Spacer(modifier = Modifier.height(8.dp))
-
-        // Logo
-        Image(
-            painter = painterResource(id = R.drawable.logo),
-            contentDescription = "Logo",
-            modifier = Modifier
-                .size(90.dp)
-                .clip(RoundedCornerShape(20.dp))
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
 
         Text(
             text = "Motorista Inteligente",
@@ -742,18 +759,16 @@ fun HomeScreen(
             Spacer(modifier = Modifier.height(24.dp))
         }
 
+        // Card de Combustível e Valor Mínimo Sugerido
+        FuelRecommendationCard()
+
+        Spacer(modifier = Modifier.height(24.dp))
+
         // Como analisamos suas corridas
         Text(
             text = "Como analisamos suas corridas",
             fontSize = 18.sp,
             fontWeight = FontWeight.Bold,
-            modifier = Modifier.fillMaxWidth()
-        )
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            text = "Cada corrida recebe um score de 0 a 100",
-            fontSize = 13.sp,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
             modifier = Modifier.fillMaxWidth()
         )
         Spacer(modifier = Modifier.height(16.dp))
@@ -765,17 +780,17 @@ fun HomeScreen(
         ) {
             AnalysisParamCard(
                 modifier = Modifier.weight(1f),
-                emoji = "💲",
+                icon = Icons.Default.AttachMoney,
                 title = "Preço/km",
                 description = "Valor da corrida dividido pela distância",
-                accent = Color(0xFF4CAF50)
+                accent = Color(0xFF00C853)
             )
             AnalysisParamCard(
                 modifier = Modifier.weight(1f),
-                emoji = "📍",
+                icon = Icons.Default.LocalOffer,
                 title = "Preço efetivo",
                 description = "Inclui km até o ponto de embarque",
-                accent = Color(0xFF1E88E5)
+                accent = Color(0xFF2979FF)
             )
         }
 
@@ -787,17 +802,17 @@ fun HomeScreen(
         ) {
             AnalysisParamCard(
                 modifier = Modifier.weight(1f),
-                emoji = "⏱",
+                icon = Icons.Default.MonetizationOn,
                 title = "Ganho/hora",
                 description = "Estimativa de quanto ganha por hora",
-                accent = Color(0xFFFF9800)
+                accent = Color(0xFFFF6D00)
             )
             AnalysisParamCard(
                 modifier = Modifier.weight(1f),
-                emoji = "🚗",
+                icon = Icons.Default.DirectionsCar,
                 title = "Embarque",
                 description = "Distância até o passageiro",
-                accent = Color(0xFFF44336)
+                accent = Color(0xFFFF1744)
             )
         }
 
@@ -809,40 +824,18 @@ fun HomeScreen(
         ) {
             AnalysisParamCard(
                 modifier = Modifier.weight(1f),
-                emoji = "🕐",
+                icon = Icons.Default.AccessTime,
                 title = "Horário",
                 description = "Bônus em horários de pico e noturno",
-                accent = Color(0xFF7B1FA2)
+                accent = Color(0xFFAA00FF)
             )
             AnalysisParamCard(
                 modifier = Modifier.weight(1f),
-                emoji = "📈",
+                icon = Icons.Default.ShowChart,
                 title = "Demanda",
                 description = "Monitoramento em tempo real da região",
-                accent = Color(0xFF00897B)
+                accent = Color(0xFF00BFA5)
             )
-        }
-
-        Spacer(modifier = Modifier.height(20.dp))
-
-        // Legenda de score
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-            ),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(14.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly
-            ) {
-                ScoreLegendItem(color = Color(0xFF4CAF50), label = "60+", tag = "Compensa")
-                ScoreLegendItem(color = Color(0xFFFF9800), label = "40-59", tag = "Neutro")
-                ScoreLegendItem(color = Color(0xFFF44336), label = "-40", tag = "Evitar")
-            }
         }
 
         Spacer(modifier = Modifier.height(32.dp))
@@ -872,25 +865,85 @@ fun RideSettingsScreen() {
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // Info adicional
+        // ========================
+        // Dados do Veículo
+        // ========================
+        VehicleSettingsCard()
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // ========================
+        // O que o app analisa
+        // ========================
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(
-                containerColor = Color(0xFF1E88E5).copy(alpha = 0.08f)
-            )
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            ),
+            shape = RoundedCornerShape(16.dp)
         ) {
-            Column(modifier = Modifier.padding(16.dp)) {
+            Column(modifier = Modifier.padding(20.dp)) {
                 Text(
-                    text = "💡 Como os valores afetam a análise",
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color(0xFF1E88E5)
+                    text = "O que analisamos por você",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
                 )
-                Spacer(modifier = Modifier.height(12.dp))
-                InfoRow("Valor mínimo/km", "Corridas abaixo deste valor recebem pontuação menor.")
-                InfoRow("Ganho mínimo/h", "Calcularemos se a corrida atinge seu objetivo por hora.")
-                InfoRow("Distância busca", "Corridas com embarque muito longe são penalizadas em -40%.")
-                InfoRow("Distância corrida", "Corridas muito longas são penalizadas em -30%.")
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Funções ativas em tempo real enquanto você dirige",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+
+                FeatureItem(
+                    icon = Icons.Default.AttachMoney,
+                    color = Color(0xFF00C853),
+                    title = "Preço por km",
+                    description = "Compara o valor da corrida com seu mínimo configurado"
+                )
+                FeatureItem(
+                    icon = Icons.Default.MonetizationOn,
+                    color = Color(0xFFFF6D00),
+                    title = "Ganho estimado por hora",
+                    description = "Calcula se a corrida atinge seu objetivo de R$/hora"
+                )
+                FeatureItem(
+                    icon = Icons.Default.DirectionsCar,
+                    color = Color(0xFFFF1744),
+                    title = "Distância de embarque",
+                    description = "Penaliza corridas onde o passageiro está muito longe"
+                )
+                FeatureItem(
+                    icon = Icons.Default.LocalGasStation,
+                    color = Color(0xFF00897B),
+                    title = "Custo de combustível",
+                    description = "Usa os dados do seu carro para calcular o custo real por km"
+                )
+                FeatureItem(
+                    icon = Icons.Default.LocalOffer,
+                    color = Color(0xFF2979FF),
+                    title = "Preço efetivo",
+                    description = "Desconta o deslocamento vazio até o passageiro do valor real"
+                )
+                FeatureItem(
+                    icon = Icons.Default.ShowChart,
+                    color = Color(0xFFAA00FF),
+                    title = "Demanda em tempo real",
+                    description = "Monitora ofertas por hora e compara com a hora anterior"
+                )
+                FeatureItem(
+                    icon = Icons.Default.AccessTime,
+                    color = Color(0xFF6D4C41),
+                    title = "Horários de baixa demanda",
+                    description = "Avisa quando é melhor parar e economizar combustível"
+                )
+                FeatureItem(
+                    icon = Icons.Default.Speed,
+                    color = Color(0xFFD50000),
+                    title = "Valor mínimo sugerido",
+                    description = "Calcula o R$/km mínimo para cobrir custos + lucro"
+                )
             }
         }
 
@@ -899,126 +952,14 @@ fun RideSettingsScreen() {
 }
 
 // ===============================================
-// DAILY ANALYTICS SCREEN (Análise do Dia)
-// ===============================================
-@Composable
-fun DailyAnalyticsScreen() {
-    val context = LocalContext.current
-    val historyManager = remember { RideHistoryManager(context) }
-    val summary = remember { historyManager.getTodaySummary() }
-    val todayRides = remember { historyManager.getToday() }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(24.dp)
-            .verticalScroll(rememberScrollState())
-    ) {
-        if (summary.totalRides == 0) {
-            EmptyStateCard(
-                emoji = "📊",
-                title = "Nenhuma corrida hoje",
-                subtitle = "As corridas aceitas aparecem aqui com a análise completa do dia."
-            )
-        } else {
-            // Card resumo do dia
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = Color(0xFF4CAF50).copy(alpha = 0.1f)
-                )
-            ) {
-                Column(modifier = Modifier.padding(20.dp)) {
-                    Text(
-                        text = "💰 Ganhos de Hoje",
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    // Valor total grande
-                    Text(
-                        text = String.format("R$ %.2f", summary.totalEarnings),
-                        fontSize = 36.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF4CAF50)
-                    )
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        StatItem("Corridas", "${summary.totalRides}")
-                        StatItem("Km total", String.format("%.1f", summary.totalDistanceKm))
-                        StatItem("R$/km", String.format("%.2f", summary.avgPricePerKm))
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        StatItem("R$/hora", String.format("%.0f", summary.avgEarningsPerHour))
-                        StatItem("R$/km médio", String.format("%.2f", summary.avgPricePerKm))
-                        StatItem("Tempo", "${summary.totalTimeMin} min")
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // Melhor e pior corrida
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                HighlightCard(
-                    modifier = Modifier.weight(1f),
-                    label = "Melhor corrida",
-                    value = String.format("R$ %.2f", summary.bestRidePrice),
-                    color = Color(0xFF4CAF50)
-                )
-                HighlightCard(
-                    modifier = Modifier.weight(1f),
-                    label = "Pior corrida",
-                    value = String.format("R$ %.2f", summary.worstRidePrice),
-                    color = Color(0xFFF44336)
-                )
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // Lista de corridas do dia
-            Text(
-                text = "Corridas de Hoje",
-                fontSize = 18.sp,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-
-            todayRides.forEach { ride ->
-                RideHistoryItem(ride)
-                Spacer(modifier = Modifier.height(6.dp))
-            }
-        }
-
-        Spacer(modifier = Modifier.height(24.dp))
-    }
-}
-
-// ===============================================
-// WEEKLY COMPARISON SCREEN (Comparação Semanal)
+// WEEKLY SUMMARY SCREEN (Resumo Semanal)
 // ===============================================
 @Composable
 fun WeeklyComparisonScreen() {
     val context = LocalContext.current
     val historyManager = remember { RideHistoryManager(context) }
     val weekSummary = remember { historyManager.getWeekSummary() }
-    val dailyEarnings = remember { historyManager.getDailyEarningsLast7Days() }
-    val dailyRides = remember { historyManager.getDailyRidesLast7Days() }
+    val dailySummaries = remember { historyManager.getDailySummariesLast7Days() }
 
     Column(
         modifier = Modifier
@@ -1030,32 +971,58 @@ fun WeeklyComparisonScreen() {
             EmptyStateCard(
                 emoji = "📅",
                 title = "Sem dados da semana",
-                subtitle = "Aceite corridas para ver a comparação dos últimos 7 dias."
+                subtitle = "Aceite corridas para ver o resumo dos últimos 7 dias."
             )
         } else {
-            // Resumo semanal
+            // Cards diários
+            Text(
+                text = "📋 Resumo por Dia",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+
+            dailySummaries.forEach { (dayName, dateBR, daySummary) ->
+                DaySummaryCard(
+                    dayName = dayName,
+                    dateBR = dateBR,
+                    summary = daySummary
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Card resumo da semana
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
-                    containerColor = Color(0xFF7B1FA2).copy(alpha = 0.08f)
-                )
+                    containerColor = Color(0xFF7B1FA2).copy(alpha = 0.10f)
+                ),
+                shape = RoundedCornerShape(16.dp)
             ) {
                 Column(modifier = Modifier.padding(20.dp)) {
                     Text(
-                        text = "📅 Semana (7 dias)",
+                        text = "📅 Resumo da Semana",
                         fontSize = 20.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    Text(
-                        text = String.format("R$ %.2f", weekSummary.totalEarnings),
-                        fontSize = 32.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFF7B1FA2)
                     )
-
                     Spacer(modifier = Modifier.height(12.dp))
+
+                    Text(
+                        text = String.format("R$ %.2f", weekSummary.totalEarnings),
+                        fontSize = 34.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF7B1FA2)
+                    )
+                    Text(
+                        text = "ganhos em 7 dias",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1063,7 +1030,7 @@ fun WeeklyComparisonScreen() {
                     ) {
                         StatItem("Corridas", "${weekSummary.totalRides}")
                         StatItem("Km total", String.format("%.1f", weekSummary.totalDistanceKm))
-                        StatItem("R$/km médio", String.format("%.2f", weekSummary.avgPricePerKm))
+                        StatItem("Tempo", "${weekSummary.totalTimeMin} min")
                     }
 
                     Spacer(modifier = Modifier.height(12.dp))
@@ -1072,88 +1039,125 @@ fun WeeklyComparisonScreen() {
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        StatItem("R$/h médio", String.format("%.0f", weekSummary.avgEarningsPerHour))
-                        StatItem("R$/km médio", String.format("%.2f", weekSummary.avgPricePerKm))
-                        StatItem("Corrida média", String.format("R$ %.0f", weekSummary.avgRidePrice))
+                        StatItem("R$/km", String.format("%.2f", weekSummary.avgPricePerKm))
+                        StatItem("R$/hora", String.format("%.0f", weekSummary.avgEarningsPerHour))
+                        StatItem("Média/corrida", String.format("R$ %.0f", weekSummary.avgRidePrice))
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Melhor e pior corrida da semana
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        HighlightCard(
+                            modifier = Modifier.weight(1f),
+                            label = "Melhor corrida",
+                            value = String.format("R$ %.2f", weekSummary.bestRidePrice),
+                            color = Color(0xFF4CAF50)
+                        )
+                        HighlightCard(
+                            modifier = Modifier.weight(1f),
+                            label = "Pior corrida",
+                            value = String.format("R$ %.2f", weekSummary.worstRidePrice),
+                            color = Color(0xFFF44336)
+                        )
+                    }
+
+                    // Melhor dia da semana
+                    val bestDay = dailySummaries
+                        .filter { it.third.totalRides > 0 }
+                        .maxByOrNull { it.third.totalEarnings }
+                    if (bestDay != null) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "⭐ Melhor dia: ${bestDay.first} (${bestDay.second}) — R$ ${String.format("%.2f", bestDay.third.totalEarnings)}",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = Color(0xFF4CAF50)
+                        )
                     }
                 }
             }
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            // Gráfico de barras — ganhos por dia
-            Text(
-                text = "💰 Ganhos por Dia",
-                fontSize = 18.sp,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-
-            BarChartCard(
-                data = dailyEarnings,
-                formatValue = { String.format("R$%.0f", it) },
-                barColor = Color(0xFF4CAF50)
-            )
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            // Gráfico de barras — corridas por dia
-            Text(
-                text = "🚗 Corridas por Dia",
-                fontSize = 18.sp,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-
-            BarChartCard(
-                data = dailyRides.map { Pair(it.first, it.second.toDouble()) },
-                formatValue = { String.format("%.0f", it) },
-                barColor = Color(0xFF1E88E5)
-            )
         }
 
         Spacer(modifier = Modifier.height(24.dp))
     }
 }
 
-// ===============================================
-// RIDE HISTORY SCREEN (Histórico de Corridas)
-// ===============================================
 @Composable
-fun RideHistoryScreen() {
-    val context = LocalContext.current
-    val historyManager = remember { RideHistoryManager(context) }
-    val rides = remember { historyManager.getAll() }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(24.dp)
-            .verticalScroll(rememberScrollState())
+fun DaySummaryCard(
+    dayName: String,
+    dateBR: String,
+    summary: RideHistoryManager.PeriodSummary
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = if (summary.totalRides > 0)
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            else
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f)
+        ),
+        shape = RoundedCornerShape(12.dp)
     ) {
-        if (rides.isEmpty()) {
-            EmptyStateCard(
-                emoji = "📋",
-                title = "Nenhuma corrida registrada",
-                subtitle = "As corridas aceitas aparecerão aqui automaticamente."
-            )
-        } else {
-            // Resumo geral
-            Text(
-                text = "${rides.size} corridas registradas",
-                fontSize = 14.sp,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-            )
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "$dayName  $dateBR",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                if (summary.totalRides > 0) {
+                    Text(
+                        text = String.format("R$ %.2f", summary.totalEarnings),
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF4CAF50)
+                    )
+                } else {
+                    Text(
+                        text = "Sem corridas",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                    )
+                }
+            }
 
-            Spacer(modifier = Modifier.height(12.dp))
-
-            rides.forEach { ride ->
-                RideHistoryItem(ride)
-                Spacer(modifier = Modifier.height(6.dp))
+            if (summary.totalRides > 0) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "${summary.totalRides} corridas",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                    Text(
+                        text = String.format("%.1f km", summary.totalDistanceKm),
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                    Text(
+                        text = String.format("R$ %.2f/km", summary.avgPricePerKm),
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                    Text(
+                        text = "${summary.totalTimeMin} min",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
             }
         }
-
-        Spacer(modifier = Modifier.height(24.dp))
     }
 }
 
@@ -1349,10 +1353,26 @@ fun TipsScreen() {
 }
 
 // ===============================================
-// LOGIN SCREEN (Layout pronto, sem funcionalidade)
+// LOGIN SCREEN (Google Sign-In com Credential Manager)
 // ===============================================
 @Composable
-fun LoginScreen() {
+fun LoginScreen(
+    firestoreManager: FirestoreManager,
+    onLoginSuccess: () -> Unit = {}
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var isLoading by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    // Se já está logado com Google, mostrar tela de perfil
+    if (firestoreManager.isGoogleUser) {
+        LoggedInScreen(firestoreManager = firestoreManager, onLogout = {
+            firestoreManager.signOut()
+        })
+        return
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1392,53 +1412,214 @@ fun LoginScreen() {
 
         Spacer(modifier = Modifier.height(32.dp))
 
-        // Botão Google (layout pronto)
+        // Botão Google Sign-In
         OutlinedButton(
-            onClick = { /* TODO: Implementar login com Google */ },
+            onClick = {
+                if (isLoading) return@OutlinedButton
+                isLoading = true
+                errorMessage = null
+
+                scope.launch {
+                    try {
+                        val credentialManager = androidx.credentials.CredentialManager.create(context)
+                        val googleIdOption = com.google.android.libraries.identity.googleid.GetGoogleIdOption.Builder()
+                            .setFilterByAuthorizedAccounts(false)
+                            .setServerClientId("742389314956-kbdu2kajfdfiitbeetekdrcikomgj07g.apps.googleusercontent.com")
+                            .build()
+                        val request = androidx.credentials.GetCredentialRequest.Builder()
+                            .addCredentialOption(googleIdOption)
+                            .build()
+
+                        val result = credentialManager.getCredential(
+                            context = context as Activity,
+                            request = request
+                        )
+                        val credential = result.credential
+                        val googleIdTokenCredential = com.google.android.libraries.identity.googleid.GoogleIdTokenCredential.createFrom(credential.data)
+                        val idToken = googleIdTokenCredential.idToken
+
+                        // Autenticar no Firebase com o token
+                        firestoreManager.signInWithGoogle(
+                            idToken = idToken,
+                            onSuccess = {
+                                isLoading = false
+                                onLoginSuccess()
+                            },
+                            onError = { e ->
+                                isLoading = false
+                                errorMessage = "Erro ao autenticar: ${e.localizedMessage}"
+                            }
+                        )
+                    } catch (e: androidx.credentials.exceptions.GetCredentialCancellationException) {
+                        isLoading = false
+                        // Usuário cancelou, não mostrar erro
+                    } catch (e: Exception) {
+                        isLoading = false
+                        errorMessage = "Erro: ${e.localizedMessage}"
+                        Log.e("LoginScreen", "Erro Google Sign-In", e)
+                    }
+                }
+            },
             modifier = Modifier
                 .fillMaxWidth()
                 .height(52.dp),
-            shape = RoundedCornerShape(12.dp)
+            shape = RoundedCornerShape(12.dp),
+            enabled = !isLoading
         ) {
-            Text("🔵  Entrar com Google", fontSize = 16.sp)
+            if (isLoading) {
+                androidx.compose.material3.CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    strokeWidth = 2.dp
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+                Text("Entrando...", fontSize = 16.sp)
+            } else {
+                Text("Entrar com Google", fontSize = 16.sp)
+            }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        // Mensagem de erro
+        if (errorMessage != null) {
+            Spacer(modifier = Modifier.height(16.dp))
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xFFF44336).copy(alpha = 0.08f)
+                )
+            ) {
+                Text(
+                    text = errorMessage!!,
+                    fontSize = 13.sp,
+                    color = Color(0xFFF44336),
+                    modifier = Modifier.padding(16.dp)
+                )
+            }
+        }
 
-        // Botão Email (layout pronto)
-        OutlinedButton(
-            onClick = { /* TODO: Implementar login com email */ },
+        Spacer(modifier = Modifier.height(32.dp))
+    }
+}
+
+// ===============================================
+// TELA LOGADO (Perfil do usuário)
+// ===============================================
+@Composable
+fun LoggedInScreen(
+    firestoreManager: FirestoreManager,
+    onLogout: () -> Unit
+) {
+    var showLogoutConfirm by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp)
+            .verticalScroll(rememberScrollState()),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Spacer(modifier = Modifier.height(40.dp))
+
+        // Avatar
+        Image(
+            painter = painterResource(id = R.drawable.logo),
+            contentDescription = "Avatar",
             modifier = Modifier
-                .fillMaxWidth()
-                .height(52.dp),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Text("✉️  Entrar com E-mail", fontSize = 16.sp)
-        }
+                .size(120.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape),
+            contentScale = ContentScale.Crop
+        )
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // Info
+        Text(
+            text = firestoreManager.displayName ?: "Motorista",
+            fontSize = 24.sp,
+            fontWeight = FontWeight.Bold
+        )
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        Text(
+            text = firestoreManager.email ?: "",
+            fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // Status card
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(
-                containerColor = Color(0xFFFF9800).copy(alpha = 0.08f)
+                containerColor = Color(0xFF4CAF50).copy(alpha = 0.08f)
             )
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    text = "🚧 Em desenvolvimento",
+                    text = "Conta conectada",
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold,
-                    color = Color(0xFFFF9800)
+                    color = Color(0xFF4CAF50)
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "O login será implementado em breve. " +
-                            "Por enquanto, todos os dados são salvos localmente no dispositivo.",
+                    text = "Seus dados estão sendo sincronizados com a nuvem automaticamente.",
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
                 )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(32.dp))
+
+        // Botão de logout
+        if (showLogoutConfirm) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xFFF44336).copy(alpha = 0.08f)
+                )
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "Deseja sair da conta?",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        OutlinedButton(onClick = { showLogoutConfirm = false }) {
+                            Text("Cancelar")
+                        }
+                        Button(
+                            onClick = {
+                                onLogout()
+                                showLogoutConfirm = false
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFFF44336)
+                            )
+                        ) {
+                            Text("Sair", color = Color.White)
+                        }
+                    }
+                }
+            }
+        } else {
+            OutlinedButton(
+                onClick = { showLogoutConfirm = true },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Text("Sair da conta", fontSize = 15.sp, color = Color(0xFFF44336))
             }
         }
 
@@ -1570,6 +1751,462 @@ fun DriverSettingsCard() {
                     text = "📌 ${prefs.getSummary()}",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                )
+            }
+        }
+    }
+}
+
+// ===============================================
+// VEHICLE SETTINGS CARD (Dados do Veículo)
+// ===============================================
+@Composable
+fun VehicleSettingsCard() {
+    val context = LocalContext.current
+    val prefs = remember { DriverPreferences(context) }
+
+    var vehicleType by remember { mutableStateOf(prefs.vehicleType) }
+    var fuelType by remember { mutableStateOf(prefs.fuelType) }
+    var kmPerLiterGasoline by remember { mutableFloatStateOf(prefs.kmPerLiterGasoline.toFloat()) }
+    var kmPerLiterEthanol by remember { mutableFloatStateOf(prefs.kmPerLiterEthanol.toFloat()) }
+    var gasolinePrice by remember { mutableFloatStateOf(prefs.gasolinePrice.toFloat()) }
+    var ethanolPrice by remember { mutableFloatStateOf(prefs.ethanolPrice.toFloat()) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = Color(0xFF00897B).copy(alpha = 0.08f)
+        )
+    ) {
+        Column(modifier = Modifier.padding(20.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.DirectionsCar,
+                    contentDescription = null,
+                    tint = Color(0xFF00897B),
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Dados do Veículo",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Tipo de veículo
+            Text(
+                text = "Tipo do veículo",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                SelectableChip(
+                    modifier = Modifier.weight(1f),
+                    label = "Combustão",
+                    icon = Icons.Default.LocalGasStation,
+                    selected = vehicleType == "combustion",
+                    color = Color(0xFFFF6D00),
+                    onClick = {
+                        vehicleType = "combustion"
+                        prefs.vehicleType = "combustion"
+                    }
+                )
+                SelectableChip(
+                    modifier = Modifier.weight(1f),
+                    label = "Elétrico",
+                    icon = Icons.Default.EvStation,
+                    selected = vehicleType == "electric",
+                    color = Color(0xFF00C853),
+                    onClick = {
+                        vehicleType = "electric"
+                        prefs.vehicleType = "electric"
+                    }
+                )
+            }
+
+            // Combustíveis (só para combustão)
+            if (vehicleType == "combustion") {
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Tipo de combustível
+                Text(
+                    text = "Combustível principal",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    SelectableChip(
+                        modifier = Modifier.weight(1f),
+                        label = "Gasolina",
+                        icon = Icons.Default.LocalGasStation,
+                        selected = fuelType == "gasoline",
+                        color = Color(0xFFF44336),
+                        onClick = {
+                            fuelType = "gasoline"
+                            prefs.fuelType = "gasoline"
+                        }
+                    )
+                    SelectableChip(
+                        modifier = Modifier.weight(1f),
+                        label = "Etanol",
+                        icon = Icons.Default.LocalGasStation,
+                        selected = fuelType == "ethanol",
+                        color = Color(0xFF4CAF50),
+                        onClick = {
+                            fuelType = "ethanol"
+                            prefs.fuelType = "ethanol"
+                        }
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Km/L Gasolina
+                StepperControl(
+                    label = "Km/L (Gasolina)",
+                    value = kmPerLiterGasoline,
+                    valueText = String.format("%.1f km/L", kmPerLiterGasoline),
+                    min = 3f,
+                    max = 25f,
+                    step = 0.5f,
+                    onValueChange = {
+                        kmPerLiterGasoline = it
+                        prefs.kmPerLiterGasoline = it.toDouble()
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Km/L Etanol
+                StepperControl(
+                    label = "Km/L (Etanol)",
+                    value = kmPerLiterEthanol,
+                    valueText = String.format("%.1f km/L", kmPerLiterEthanol),
+                    min = 2f,
+                    max = 20f,
+                    step = 0.5f,
+                    onValueChange = {
+                        kmPerLiterEthanol = it
+                        prefs.kmPerLiterEthanol = it.toDouble()
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Preço Gasolina
+                StepperControl(
+                    label = "Preço Gasolina (R$/L)",
+                    value = gasolinePrice,
+                    valueText = String.format("R$ %.2f", gasolinePrice),
+                    min = 2f,
+                    max = 10f,
+                    step = 0.01f,
+                    onValueChange = {
+                        val rounded = (Math.round(it * 100.0) / 100.0).toFloat()
+                        gasolinePrice = rounded
+                        prefs.gasolinePrice = rounded.toDouble()
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Preço Etanol
+                StepperControl(
+                    label = "Preço Etanol (R$/L)",
+                    value = ethanolPrice,
+                    valueText = String.format("R$ %.2f", ethanolPrice),
+                    min = 1.5f,
+                    max = 8f,
+                    step = 0.01f,
+                    onValueChange = {
+                        val rounded = (Math.round(it * 100.0) / 100.0).toFloat()
+                        ethanolPrice = rounded
+                        prefs.ethanolPrice = rounded.toDouble()
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Resumo de custos
+                val custGas = prefs.gasolineCostPerKm
+                val custEth = prefs.ethanolCostPerKm
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            Color(0xFF424242).copy(alpha = 0.15f),
+                            RoundedCornerShape(8.dp)
+                        )
+                        .padding(10.dp)
+                ) {
+                    Column {
+                        Text(
+                            text = "Custo/km: Gasolina R$ ${String.format("%.2f", custGas)} | Etanol R$ ${String.format("%.2f", custEth)}",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                        Text(
+                            text = if (prefs.isEthanolBetter) "Etanol compensa mais na sua cidade"
+                                   else "Gasolina compensa mais na sua cidade",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (prefs.isEthanolBetter) Color(0xFF4CAF50) else Color(0xFFF44336)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun SelectableChip(
+    modifier: Modifier = Modifier,
+    label: String,
+    icon: ImageVector,
+    selected: Boolean,
+    color: Color,
+    onClick: () -> Unit
+) {
+    val bgColor = if (selected) color.copy(alpha = 0.15f) else Color.Transparent
+    val borderColor = if (selected) color else MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier.height(44.dp),
+        shape = RoundedCornerShape(12.dp),
+        colors = ButtonDefaults.outlinedButtonColors(containerColor = bgColor),
+        border = androidx.compose.foundation.BorderStroke(
+            width = if (selected) 2.dp else 1.dp,
+            color = borderColor
+        )
+    ) {
+        Icon(
+            imageVector = if (selected) Icons.Default.Check else icon,
+            contentDescription = null,
+            tint = if (selected) color else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            modifier = Modifier.size(18.dp)
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = label,
+            fontSize = 13.sp,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+            color = if (selected) color else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+        )
+    }
+}
+
+// ===============================================
+// FUEL RECOMMENDATION CARD (Página Inicial)
+// ===============================================
+@Composable
+fun FuelRecommendationCard() {
+    val context = LocalContext.current
+    val prefs = remember { DriverPreferences(context) }
+
+    // Só mostrar para veículos a combustão
+    if (prefs.vehicleType == "electric") return
+
+    val isEthanolBetter = prefs.isEthanolBetter
+    val custGas = prefs.gasolineCostPerKm
+    val custEth = prefs.ethanolCostPerKm
+    val suggestedMin = prefs.suggestedMinPricePerKm()
+    val fuelCost = prefs.fuelCostPerKm
+
+    val recommendedColor = if (isEthanolBetter) Color(0xFF00C853) else Color(0xFFFF6D00)
+    val recommendedLabel = if (isEthanolBetter) "Etanol" else "Gasolina"
+    val recommendedIcon = Icons.Default.LocalGasStation
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = recommendedColor.copy(alpha = 0.08f)
+        ),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .background(recommendedColor.copy(alpha = 0.20f), RoundedCornerShape(12.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = recommendedIcon,
+                        contentDescription = null,
+                        tint = recommendedColor,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                Column {
+                    Text(
+                        text = "Melhor combustível: $recommendedLabel",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = recommendedColor
+                    )
+                    Text(
+                        text = "Baseado nos preços da sua cidade",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Comparação
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Gasolina", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                    Text(
+                        text = "R$ ${String.format("%.2f", custGas)}/km",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (!isEthanolBetter) Color(0xFF00C853) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                }
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Etanol", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                    Text(
+                        text = "R$ ${String.format("%.2f", custEth)}/km",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (isEthanolBetter) Color(0xFF00C853) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                }
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Seu custo", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                    Text(
+                        text = "R$ ${String.format("%.2f", fuelCost)}/km",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = recommendedColor
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Valor mínimo sugerido
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(recommendedColor.copy(alpha = 0.12f), RoundedCornerShape(10.dp))
+                    .padding(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = "Valor mínimo sugerido",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                        )
+                        Text(
+                            text = "Para cobrir custos + lucro",
+                            fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                        )
+                    }
+                    Text(
+                        text = "R$ ${String.format("%.2f", suggestedMin)}/km",
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = recommendedColor
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun StepperControl(
+    label: String,
+    value: Float,
+    valueText: String,
+    min: Float,
+    max: Float,
+    step: Float,
+    onValueChange: (Float) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = label,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.padding(bottom = 6.dp)
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    Color(0xFF424242).copy(alpha = 0.12f),
+                    RoundedCornerShape(12.dp)
+                )
+                .padding(horizontal = 4.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            IconButton(
+                onClick = {
+                    val newVal = (value - step).coerceIn(min, max)
+                    onValueChange(newVal)
+                }
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Remove,
+                    contentDescription = "Diminuir",
+                    tint = Color(0xFFFF6F00),
+                    modifier = Modifier.size(28.dp)
+                )
+            }
+
+            Text(
+                text = valueText,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFFFF6F00),
+                modifier = Modifier.weight(1f),
+                textAlign = TextAlign.Center
+            )
+
+            IconButton(
+                onClick = {
+                    val newVal = (value + step).coerceIn(min, max)
+                    onValueChange(newVal)
+                }
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Add,
+                    contentDescription = "Aumentar",
+                    tint = Color(0xFFFF6F00),
+                    modifier = Modifier.size(28.dp)
                 )
             }
         }
@@ -1889,7 +2526,7 @@ fun PermissionCard(
 @Composable
 fun AnalysisParamCard(
     modifier: Modifier = Modifier,
-    emoji: String,
+    icon: ImageVector,
     title: String,
     description: String,
     accent: Color
@@ -1897,7 +2534,7 @@ fun AnalysisParamCard(
     Card(
         modifier = modifier,
         colors = CardDefaults.cardColors(
-            containerColor = accent.copy(alpha = 0.08f)
+            containerColor = accent.copy(alpha = 0.10f)
         ),
         shape = RoundedCornerShape(16.dp)
     ) {
@@ -1906,11 +2543,16 @@ fun AnalysisParamCard(
         ) {
             Box(
                 modifier = Modifier
-                    .size(38.dp)
-                    .background(accent.copy(alpha = 0.15f), RoundedCornerShape(10.dp)),
+                    .size(40.dp)
+                    .background(accent.copy(alpha = 0.20f), RoundedCornerShape(12.dp)),
                 contentAlignment = Alignment.Center
             ) {
-                Text(text = emoji, fontSize = 18.sp)
+                Icon(
+                    imageVector = icon,
+                    contentDescription = title,
+                    tint = accent,
+                    modifier = Modifier.size(22.dp)
+                )
             }
             Spacer(modifier = Modifier.height(10.dp))
             Text(
@@ -1926,22 +2568,6 @@ fun AnalysisParamCard(
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                 lineHeight = 16.sp
             )
-        }
-    }
-}
-
-@Composable
-fun ScoreLegendItem(color: Color, label: String, tag: String) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(
-            modifier = Modifier
-                .size(10.dp)
-                .background(color, CircleShape)
-        )
-        Spacer(modifier = Modifier.width(6.dp))
-        Column {
-            Text(text = label, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-            Text(text = tag, fontSize = 10.sp, color = color)
         }
     }
 }
@@ -2145,6 +2771,45 @@ fun TipCard(emoji: String, title: String, tips: List<String>) {
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
                 )
             }
+        }
+    }
+}
+
+@Composable
+fun FeatureItem(
+    icon: ImageVector,
+    color: Color,
+    title: String,
+    description: String
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Box(
+            modifier = Modifier
+                .size(32.dp)
+                .background(color.copy(alpha = 0.15f), RoundedCornerShape(8.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = color,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Column {
+            Text(text = title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                text = description,
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+                lineHeight = 16.sp
+            )
         }
     }
 }

@@ -32,6 +32,9 @@ class RideHistoryManager(context: Context) {
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
     private val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
 
+    /** Referência opcional ao FirestoreManager para sync automático */
+    var firestoreManager: FirestoreManager? = null
+
     init {
         loadFromPrefs()
     }
@@ -97,6 +100,9 @@ class RideHistoryManager(context: Context) {
 
         // Também registra no DemandTracker para ganhos de sessão
         DemandTracker.recordRideAccepted(ride.price)
+
+        // Sync com Firestore
+        firestoreManager?.saveRide(ride)
 
         // Limitar tamanho
         while (history.size > MAX_ENTRIES) {
@@ -229,6 +235,27 @@ class RideHistoryManager(context: Context) {
             val dayName = dayNameFormat.format(cal.time).replaceFirstChar { it.uppercase() }
             val count = history.count { it.date == dateStr }
             result.add(Pair(dayName, count))
+        }
+        return result
+    }
+
+    /**
+     * Resumo diário para cada um dos últimos 7 dias.
+     * Retorna lista de (nomeAbreviadoDoDia, dataBR, PeriodSummary).
+     */
+    fun getDailySummariesLast7Days(): List<Triple<String, String, PeriodSummary>> {
+        val cal = Calendar.getInstance()
+        val result = mutableListOf<Triple<String, String, PeriodSummary>>()
+        val dayNameFormat = SimpleDateFormat("EEEE", Locale("pt", "BR"))
+        val displayDateFormat = SimpleDateFormat("dd/MM", Locale("pt", "BR"))
+        for (i in 6 downTo 0) {
+            cal.timeInMillis = System.currentTimeMillis()
+            cal.add(Calendar.DAY_OF_YEAR, -i)
+            val dateStr = dateFormat.format(cal.time)
+            val dayName = dayNameFormat.format(cal.time).replaceFirstChar { it.uppercase() }
+            val dateBR = displayDateFormat.format(cal.time)
+            val dayRides = history.filter { it.date == dateStr }
+            result.add(Triple(dayName, dateBR, getSummary(dayRides)))
         }
         return result
     }

@@ -1,9 +1,12 @@
 package com.example.motoristainteligente
 
 import android.content.Context
+import android.location.Geocoder
 import android.location.Location
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
+import java.util.Locale
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -26,6 +29,7 @@ import java.util.concurrent.Executors
 class MarketDataService(private val context: Context) {
 
     companion object {
+        private const val TAG = "MarketDataService"
         private const val CACHE_DURATION_MS = 30 * 60 * 1000L // 30 min
         private const val PREFS_NAME = "market_data_prefs"
         private const val KEY_LAST_FETCH = "last_fetch_time"
@@ -296,20 +300,26 @@ class MarketDataService(private val context: Context) {
 
     private fun getRegionName(location: Location?): String {
         if (location == null) return "Região não identificada"
-        val lat = location.latitude
-        val lng = location.longitude
-        return when {
-            lat in -23.7..-23.4 && lng in -46.8..-46.5 -> "São Paulo - Centro/Oeste"
-            lat in -23.6..-23.3 && lng in -46.7..-46.4 -> "São Paulo - Norte/Leste"
-            lat in -23.1..-22.7 && lng in -43.5..-43.0 -> "Rio de Janeiro"
-            lat in -19.9..-19.7 && lng in -44.0..-43.8 -> "Belo Horizonte"
-            lat in -15.9..-15.7 && lng in -48.1..-47.7 -> "Brasília"
-            lat in -25.5..-25.3 && lng in -49.4..-49.1 -> "Curitiba"
-            lat in -30.1..-29.9 && lng in -51.3..-51.0 -> "Porto Alegre"
-            lat in -12.9..-12.8 && lng in -38.6..-38.4 -> "Salvador"
-            lat in -8.1..-7.9 && lng in -35.0..-34.8 -> "Recife"
-            lat in -3.8..-3.6 && lng in -38.6..-38.4 -> "Fortaleza"
-            else -> "Região: ${String.format("%.1f", lat)}, ${String.format("%.1f", lng)}"
+        return try {
+            val geocoder = Geocoder(context, Locale("pt", "BR"))
+            @Suppress("DEPRECATION")
+            val addresses = geocoder.getFromLocation(location.latitude, location.longitude, 1)
+            if (!addresses.isNullOrEmpty()) {
+                val addr = addresses[0]
+                val bairro = addr.subLocality  // Nome do bairro
+                val cidade = addr.locality ?: addr.subAdminArea ?: addr.adminArea
+                when {
+                    bairro != null && cidade != null -> "$bairro, $cidade"
+                    cidade != null -> cidade
+                    bairro != null -> bairro
+                    else -> "Região não identificada"
+                }
+            } else {
+                "Região não identificada"
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Geocoder falhou", e)
+            "Região não identificada"
         }
     }
 

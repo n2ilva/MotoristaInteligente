@@ -46,6 +46,7 @@ class FloatingAnalyticsService : Service() {
     private lateinit var locationHelper: LocationHelper
     private lateinit var marketDataService: MarketDataService
     private lateinit var driverPreferences: DriverPreferences
+    private lateinit var firestoreManager: FirestoreManager
 
     private var floatingButton: View? = null
     private var analysisCard: View? = null
@@ -79,6 +80,13 @@ class FloatingAnalyticsService : Service() {
 
         // Carregar preferências do motorista e aplicar no analisador
         driverPreferences = DriverPreferences(this)
+
+        // Inicializar Firebase
+        firestoreManager = FirestoreManager(this)
+        firestoreManager.signInAnonymously {
+            driverPreferences.firestoreManager = firestoreManager
+        }
+
         driverPreferences.applyToAnalyzer()
 
         // Iniciar rastreamento de demanda
@@ -126,6 +134,13 @@ class FloatingAnalyticsService : Service() {
 
     override fun onDestroy() {
         instance = null
+        // Salvar resumo da sessão no Firestore
+        try {
+            val stats = DemandTracker.getStats()
+            if (stats.sessionDurationMin > 1) {
+                firestoreManager.saveSessionSummary(stats)
+            }
+        } catch (_: Exception) { }
         locationHelper.stopLocationUpdates()
         marketDataService.stop()
         removeFloatingButton()
