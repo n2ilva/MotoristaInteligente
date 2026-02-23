@@ -1,7 +1,6 @@
 package com.example.motoristainteligente
 
 import android.app.Activity
-import android.app.NotificationManager
 import android.Manifest
 import android.content.Context
 import android.content.Intent
@@ -679,8 +678,7 @@ fun HomeScreen(
                     val isLocationActive = ContextCompat.checkSelfPermission(
                         context, Manifest.permission.ACCESS_FINE_LOCATION
                     ) == PackageManager.PERMISSION_GRANTED
-                    val isNotificationActive = (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
-                        .areNotificationsEnabled()
+                    val isOverlayActive = android.provider.Settings.canDrawOverlays(context)
 
                     Column(
                         modifier = Modifier.fillMaxWidth(),
@@ -688,7 +686,7 @@ fun HomeScreen(
                     ) {
                         StatusIndicatorRow("Acessibilidade", isAccessibilityActive)
                         StatusIndicatorRow("Localização", isLocationActive)
-                        StatusIndicatorRow("Notificação", isNotificationActive)
+                        StatusIndicatorRow("Sobreposição de Tela", isOverlayActive)
                     }
 
                     if (!isAccessibilityActive) {
