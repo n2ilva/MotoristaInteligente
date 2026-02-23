@@ -236,6 +236,58 @@ class RideInfoAccessibilityService : AccessibilityService() {
     private var ocrConsecutiveFails = 0           // Backoff progressivo: falhas OCR consecutivas
     private val OCR_BACKOFF_MAX_MS = 60_000L      // Máximo backoff: 60s
 
+    // ========================
+    // Detecção de Aceitação de Corrida
+    // ========================
+    // Após uma oferta ser detectada, monitorar por sinais de aceitação
+    // (tela mudou para "a caminho", "corrida aceita", etc.)
+    private var lastOfferAppSource: AppSource? = null
+    private var lastOfferTimestamp = 0L
+    private var lastOfferAlreadyAccepted = false
+    private val ACCEPTANCE_DETECTION_WINDOW_MS = 30_000L  // Janela de 30s pós-oferta
+
+    // Padrões que indicam que o motorista ACEITOU a corrida
+    // Aparecem quando a tela muda do popup de oferta para o modo "em corrida"
+    private val ACCEPTANCE_SIGNALS = listOf(
+        // Português
+        "a caminho", "indo buscar", "navegando", "em andamento",
+        "corrida aceita", "viagem aceita", "aceita com sucesso",
+        "ir até o passageiro", "buscar passageiro",
+        "iniciar viagem", "iniciar corrida",
+        "chegar ao passageiro", "chegando",
+        "rota iniciada", "navegação iniciada",
+        "iniciar navegação", "navegar",
+        "dirigir até", "ir ao embarque",
+        // Inglês (Uber)
+        "heading to", "navigating to", "navigate to",
+        "trip accepted", "ride accepted",
+        "start trip", "start navigation",
+        "picking up", "on the way",
+        "arriving", "drive to pickup"
+    )
+
+    // Sinais de que a oferta foi RECUSADA / expirou (para limpar o estado)
+    private val REJECTION_SIGNALS = listOf(
+        "corrida perdida", "oferta expirou", "tempo esgotado",
+        "trip missed", "offer expired", "timed out",
+        "próxima corrida", "next trip",
+        "você está online", "procurando viagens",
+        "procurando corridas", "corrida cancelada",
+        "viagem cancelada", "trip cancelled", "ride cancelled"
+    )
+
+    // Padrões de texto de botão/view que indicam aceitação por CLIQUE
+    // Uber: botão "Aceitar" / "Accept"
+    private val UBER_ACCEPT_CLICK_PATTERNS = listOf(
+        "aceitar", "accept", "confirmar viagem", "confirm trip"
+    )
+    // 99: clique no card de informações da corrida (textos que aparecem no card clicável)
+    private val NINETY_NINE_CARD_CLICK_PATTERNS = listOf(
+        "aceitar", "accept",
+        // O card da 99 mostra preço — se clicou num elemento com R$ durante oferta, é aceite
+        "r\\$", "reais"
+    )
+
     private fun shouldLogEvent(key: String): Boolean {
         val now = System.currentTimeMillis()
         val last = lastEventLogAt[key] ?: 0L
@@ -299,11 +351,12 @@ class RideInfoAccessibilityService : AccessibilityService() {
     /**
      * Detecta se o app usa renderização customizada que resulta em árvore de acessibilidade VAZIA.
      * App 99 (com.app99.driver) usa Compose/Canvas sem labels → nenhum texto nos nós.
+     * App Uber (com.ubercab.driver) pode usar React Native que também resulta em árvore vazia.
      * Para esses apps, OCR é a ÚNICA via funcional de extração.
      */
     private fun isEmptyTreeApp(packageName: String): Boolean {
         val source = detectAppSource(packageName)
-        if (source != AppSource.NINETY_NINE) return false
+        if (source != AppSource.NINETY_NINE && source != AppSource.UBER) return false
 
         // Verificar se a árvore realmente está vazia (rápido: checar se há algum texto)
         val sampleText = extractTextFromInteractiveWindows(packageName)
@@ -348,6 +401,33 @@ class RideInfoAccessibilityService : AccessibilityService() {
         val eventType = event.eventType
         val now = System.currentTimeMillis()
 
+        // ========== DETECÇÃO DE ACEITAÇÃO ==========
+        // Verificar sinais de aceitação ANTES do cooldown (não pode perder esses eventos)
+        if (lastOfferAppSource != null && !lastOfferAlreadyAccepted) {
+            val timeSinceOffer = now - lastOfferTimestamp
+            if (timeSinceOffer <= ACCEPTANCE_DETECTION_WINDOW_MS) {
+                // === DETECÇÃO POR CLIQUE (TYPE_VIEW_CLICKED) ===
+                if (eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+                    handleAcceptanceClick(event, packageName, now)
+                }
+
+                // === DETECÇÃO POR MUDANÇA DE TELA (sinais textuais) ===
+                val quickText = event.text?.joinToString(" ")?.trim().orEmpty()
+                if (quickText.isNotBlank()) {
+                    checkForAcceptanceSignal(quickText, packageName, now)
+                }
+            } else {
+                // Janela expirou — oferta provavelmente foi ignorada/expirou
+                if (shouldLogDiagnostic("offer-expired|$packageName")) {
+                    Log.d(TAG, "Oferta expirada sem aceitação detectada (${timeSinceOffer}ms)")
+                }
+                clearOfferState()
+            }
+        }
+
+        // TYPE_VIEW_CLICKED não precisa de mais processamento além da aceitação
+        if (eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) return
+
         // Cooldown diferenciado por tipo de evento
         val cooldown = when (eventType) {
             AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED -> NOTIFICATION_COOLDOWN
@@ -381,14 +461,21 @@ class RideInfoAccessibilityService : AccessibilityService() {
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
             AccessibilityEvent.TYPE_VIEW_SELECTED,
             AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
-                // Eventos de conteúdo/seleção/scroll (99 costuma expor texto aqui)
+                // Eventos de conteúdo/seleção/scroll (99 e Uber costumam expor texto aqui)
+                // Resetar idle da Uber em CONTENT_CHANGED se o evento tem sinal forte de corrida
+                val contentEventText = event.text?.joinToString(" ")?.trim().orEmpty()
+                if (detectAppSource(packageName) == AppSource.UBER && hasStrongRideSignal(contentEventText)) {
+                    uberOnlineIdle = false
+                    ocrConsecutiveFails = 0
+                }
+
                 val lastState = lastStateEventByPackage[packageName] ?: 0L
                 val lastNotif = lastNotificationEventByPackage[packageName] ?: 0L
                 val hasRecentContext =
                     (now - lastState) <= CONTENT_EVENT_CONTEXT_WINDOW_MS ||
                         (now - lastNotif) <= CONTENT_EVENT_CONTEXT_WINDOW_MS
 
-                val eventText = event.text?.joinToString(" ")?.trim().orEmpty()
+                val eventText = contentEventText
                 val strongSignalInEvent = hasStrongRideSignal(eventText)
                 val sourceTextPreview = if (!hasRecentContext && !strongSignalInEvent) {
                     extractTextFromEventSource(event)
@@ -409,8 +496,7 @@ class RideInfoAccessibilityService : AccessibilityService() {
                     }
 
                     // Sem contexto STATE/NOTIF e sem sinal forte na árvore:
-                    // Disparar OCR apenas para apps com árvore vazia (99).
-                    // Uber tem árvore funcional — OCR dispara via handleWindowChange se árvore falhar.
+                    // Disparar OCR para apps com árvore vazia (99 e Uber com React Native).
                     if (isEmptyTreeApp(packageName)) {
                         if (requestOcrFallbackForOffer(packageName, "content-no-context")) {
                             Log.d(TAG, "OCR disparado para $packageName (content sem contexto)")
@@ -450,6 +536,132 @@ class RideInfoAccessibilityService : AccessibilityService() {
         pendingRideData = null
         pendingRunnable = null
         Log.w(TAG, "Serviço de acessibilidade destruído")
+    }
+
+    // ========================
+    // Detecção de Aceitação — Métodos
+    // ========================
+
+    /**
+     * Verifica se o texto na tela contém sinais de aceitação ou rejeição de corrida.
+     * Chamado durante a janela de detecção após uma oferta ser mostrada.
+     */
+    private fun checkForAcceptanceSignal(text: String, packageName: String, timestamp: Long) {
+        if (lastOfferAlreadyAccepted) return
+        val lower = text.lowercase()
+
+        // Verificar sinais de REJEIÇÃO primeiro (expirou, perdida, etc.)
+        val rejectionMatch = REJECTION_SIGNALS.any { lower.contains(it) }
+        if (rejectionMatch) {
+            Log.d(TAG, "✗ Sinal de REJEIÇÃO detectado: '$text' → oferta descartada")
+            clearOfferState()
+            return
+        }
+
+        // Verificar sinais de ACEITAÇÃO
+        val acceptanceMatch = ACCEPTANCE_SIGNALS.any { lower.contains(it) }
+        if (acceptanceMatch) {
+            markOfferAsAccepted("TELA", text)
+        }
+    }
+
+    /**
+     * Trata TYPE_VIEW_CLICKED durante a janela de aceitação.
+     * Uber: detecta clique no botão "Aceitar" / "Accept"
+     * 99: detecta clique no card de informações da corrida
+     */
+    private fun handleAcceptanceClick(event: AccessibilityEvent, packageName: String, timestamp: Long) {
+        if (lastOfferAlreadyAccepted) return
+        val appSource = lastOfferAppSource ?: return
+
+        // Texto do elemento clicado
+        val clickedText = buildString {
+            event.text?.joinToString(" ")?.let { append(it) }
+            event.contentDescription?.let {
+                if (isNotBlank()) append(" ")
+                append(it)
+            }
+        }.trim().lowercase()
+
+        if (clickedText.isBlank()) {
+            // Tentar extrair texto do source node
+            val sourceText = try {
+                event.source?.text?.toString()?.lowercase().orEmpty()
+            } catch (_: Exception) { "" }
+            if (sourceText.isBlank()) return
+            checkClickTextForAcceptance(sourceText, appSource, packageName)
+            return
+        }
+
+        checkClickTextForAcceptance(clickedText, appSource, packageName)
+    }
+
+    /**
+     * Verifica se o texto de um clique corresponde a um padrão de aceitação.
+     */
+    private fun checkClickTextForAcceptance(clickedText: String, appSource: AppSource, packageName: String) {
+        val patterns = when (appSource) {
+            AppSource.UBER -> UBER_ACCEPT_CLICK_PATTERNS
+            AppSource.NINETY_NINE -> NINETY_NINE_CARD_CLICK_PATTERNS
+            else -> return
+        }
+
+        val matched = patterns.any { pattern ->
+            if (pattern.contains("\\")) {
+                // Tratar como regex simples
+                try { Regex(pattern, RegexOption.IGNORE_CASE).containsMatchIn(clickedText) }
+                catch (_: Exception) { false }
+            } else {
+                clickedText.contains(pattern)
+            }
+        }
+
+        if (matched) {
+            Log.d(TAG, "✓ Clique de ACEITAÇÃO detectado em ${appSource.displayName}: '$clickedText'")
+            markOfferAsAccepted("CLIQUE", clickedText)
+        } else {
+            Log.d(TAG, "Clique ignorado (sem padrão de aceitação): '$clickedText' em ${appSource.displayName}")
+        }
+    }
+
+    /**
+     * Marca a oferta pendente como aceita e notifica os serviços.
+     */
+    private fun markOfferAsAccepted(detectionMethod: String, signalText: String) {
+        val appSource = lastOfferAppSource ?: return
+        lastOfferAlreadyAccepted = true
+
+        // Marcar no DemandTracker
+        val marked = DemandTracker.markLastOfferAsAccepted(appSource)
+        Log.i(TAG, "=========================================")
+        Log.i(TAG, "✓ CORRIDA ACEITA DETECTADA!")
+        Log.i(TAG, "  Método: $detectionMethod")
+        Log.i(TAG, "  App: ${appSource.displayName}")
+        Log.i(TAG, "  Sinal: '${signalText.take(80)}'")
+        Log.i(TAG, "  Marcada no tracker: $marked")
+        Log.i(TAG, "=========================================")
+
+        // Notificar FloatingAnalyticsService para atualizar o status card
+        FloatingAnalyticsService.instance?.onRideAccepted(appSource)
+    }
+
+    /**
+     * Limpa o estado de rastreamento de oferta pendente.
+     */
+    private fun clearOfferState() {
+        lastOfferAppSource = null
+        lastOfferTimestamp = 0L
+        lastOfferAlreadyAccepted = false
+    }
+
+    /**
+     * Registra que uma nova oferta foi mostrada, iniciando a janela de detecção de aceitação.
+     */
+    private fun registerOfferForAcceptanceTracking(appSource: AppSource) {
+        lastOfferAppSource = appSource
+        lastOfferTimestamp = System.currentTimeMillis()
+        lastOfferAlreadyAccepted = false
+        Log.d(TAG, "Oferta registrada para rastreamento de aceitação: ${appSource.displayName}")
     }
 
     // ========================
@@ -496,6 +708,28 @@ class RideInfoAccessibilityService : AccessibilityService() {
             Log.i(TAG, "=== NOTIFICAÇÃO 99 com sinal de corrida (sem dados) → OCR ===")
             Log.i(TAG, "Texto: ${text.take(300)}")
             requestOcrFallbackForOffer(packageName, "99-notif-ride-signal")
+            return
+        }
+
+        // Notificação da Uber do tipo "Nova viagem", "Novo pedido", "trip request" etc.
+        // → sinal de que há corrida disponível, mas o texto da notif pode não ter dados completos
+        // → disparar OCR se a notificação não tem preço+km+min
+        val isUberRideSignal = detectAppSource(packageName) == AppSource.UBER &&
+            (text.contains("viagem", ignoreCase = true) ||
+             text.contains("corrida", ignoreCase = true) ||
+             text.contains("pedido", ignoreCase = true) ||
+             text.contains("trip", ignoreCase = true) ||
+             text.contains("request", ignoreCase = true) ||
+             text.contains("ride", ignoreCase = true) ||
+             text.contains("delivery", ignoreCase = true) ||
+             text.contains("entrega", ignoreCase = true))
+
+        if (isUberRideSignal && !isLikelyRideOffer(text, isStateChange = true)) {
+            Log.i(TAG, "=== NOTIFICAÇÃO UBER com sinal de corrida (sem dados) → OCR ===")
+            Log.i(TAG, "Texto: ${text.take(300)}")
+            uberOnlineIdle = false
+            ocrConsecutiveFails = 0
+            requestOcrFallbackForOffer(packageName, "uber-notif-ride-signal")
             return
         }
 
@@ -1271,6 +1505,9 @@ class RideInfoAccessibilityService : AccessibilityService() {
         Log.i(TAG, "=========================================")
 
         queueRideDataForFloatingService(rideData, "Corrida enviada ao FloatingAnalyticsService")
+
+        // Registrar oferta para rastreamento de aceitação
+        registerOfferForAcceptanceTracking(appSource)
     }
 
     private fun queueRideDataForFloatingService(rideData: RideData, successMessage: String) {

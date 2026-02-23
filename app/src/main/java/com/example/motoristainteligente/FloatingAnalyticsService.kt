@@ -50,6 +50,7 @@ class FloatingAnalyticsService : Service() {
     private var floatingButton: View? = null
     private var analysisCard: View? = null
     private var statusCard: View? = null
+    private var statusCardOverlay: View? = null
     private var isCardVisible = false
     private var isStatusCardVisible = false
 
@@ -166,15 +167,10 @@ class FloatingAnalyticsService : Service() {
         )
 
         val stats = DemandTracker.getStats()
-        val contentText = buildString {
-            append("${stats.demandLevel.emoji} ${stats.demandLevel.displayText}")
-            append(" • ${stats.trend.emoji}")
-            if (stats.sessionDurationMin > 0) {
-                append(" • ${stats.sessionDurationMin}min")
-            }
-            if (stats.sessionTotalEarnings > 0) {
-                append(" • R$ ${String.format("%.0f", stats.sessionTotalEarnings)}")
-            }
+        val contentText = when (stats.trend) {
+            DemandTracker.DemandTrend.RISING -> "Demanda subindo"
+            DemandTracker.DemandTrend.FALLING -> "Demanda caindo"
+            DemandTracker.DemandTrend.STABLE -> "Demanda estável"
         }
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
@@ -357,7 +353,7 @@ class FloatingAnalyticsService : Service() {
                 RideAnalyzer.analyze(rideData, pickupDistance)
             }
 
-            Log.i("FloatingAnalytics", ">>> Análise: Score=${analysis.score}, Rec=${analysis.recommendation}")
+            Log.i("FloatingAnalytics", ">>> Análise: Rec=${analysis.recommendation}")
 
             showAnalysisCard(analysis)
 
@@ -369,6 +365,20 @@ class FloatingAnalyticsService : Service() {
         }
         pendingRideRunnable = runnable
         handler.postDelayed(runnable, RIDE_DEBOUNCE_MS)
+    }
+
+    /**
+     * Chamado pelo AccessibilityService quando uma corrida é aceita pelo motorista.
+     * Atualiza o status card com as contagens de aceitas.
+     */
+    fun onRideAccepted(appSource: AppSource) {
+        handler.post {
+            Log.i("FloatingAnalytics", ">>> Corrida ACEITA: ${appSource.displayName}")
+            // Atualizar o status card para refletir a aceitação
+            populateStatusCard()
+            // Atualizar notificação
+            updateNotificationWithStats()
+        }
     }
 
     /**
@@ -475,6 +485,20 @@ class FloatingAnalyticsService : Service() {
 
         populateStatusCard()
 
+        // Overlay transparente fullscreen para fechar ao tocar fora
+        statusCardOverlay = View(this).apply {
+            setBackgroundColor(0x01000000) // quase transparente mas captura toques
+            setOnClickListener { hideStatusCard() }
+        }
+        val overlayParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT
+        )
+
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -487,6 +511,7 @@ class FloatingAnalyticsService : Service() {
         }
 
         try {
+            windowManager.addView(statusCardOverlay, overlayParams)
             windowManager.addView(statusCard, params)
             isStatusCardVisible = true
 
@@ -497,9 +522,9 @@ class FloatingAnalyticsService : Service() {
                 ?.setDuration(300)
                 ?.start()
 
-            // Auto-ocultar após 20 segundos
+            // Auto-ocultar após 30 segundos (fallback)
             handler.removeCallbacks(hideStatusCardRunnable)
-            handler.postDelayed(hideStatusCardRunnable, 20_000)
+            handler.postDelayed(hideStatusCardRunnable, 30_000)
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -519,23 +544,29 @@ class FloatingAnalyticsService : Service() {
         card.findViewById<TextView>(R.id.tvSessionTime).text =
             if (hours > 0) "${hours}h ${mins}min" else "${mins}min"
 
-        // Demanda: texto simples baseado na razão
-        val expectedRides30 = ((marketInfo?.demandIndex ?: 0.45) * 8.0).toInt().coerceAtLeast(1)
-        val demandRatio = stats.ridesLast30Min.toDouble() / expectedRides30.toDouble()
+        // Demanda: baseada na comparação hora-a-hora
         val demandText: String
         val demandColor: Int
         when {
-            demandRatio >= 1.2 -> {
-                demandText = "Acima da média"
-                demandColor = 0xFF4CAF50.toInt()
+            stats.ridesPreviousHour == 0 && stats.ridesLastHour == 0 -> {
+                demandText = "Sem dados"
+                demandColor = 0xFF9E9E9E.toInt()
             }
-            demandRatio >= 0.8 -> {
-                demandText = "Dentro da média"
+            stats.ridesPreviousHour == 0 -> {
+                demandText = "Coletando dados"
                 demandColor = 0xFFFFC107.toInt()
             }
-            else -> {
-                demandText = "Abaixo da média"
+            stats.ridesLastHour > stats.ridesPreviousHour -> {
+                demandText = "Demanda subindo"
+                demandColor = 0xFF4CAF50.toInt()
+            }
+            stats.ridesLastHour < stats.ridesPreviousHour -> {
+                demandText = "Demanda caindo"
                 demandColor = 0xFFF44336.toInt()
+            }
+            else -> {
+                demandText = "Demanda estável"
+                demandColor = 0xFFFFC107.toInt()
             }
         }
         card.findViewById<TextView>(R.id.tvDemandLevel).apply {
@@ -554,9 +585,15 @@ class FloatingAnalyticsService : Service() {
             dividerAlert.visibility = View.GONE
         }
 
-        // Corridas por plataforma
-        card.findViewById<TextView>(R.id.tvRidesUber).text = "${stats.totalRidesUber}"
-        card.findViewById<TextView>(R.id.tvRides99).text = "${stats.totalRides99}"
+        // Corridas por plataforma (ofertas / aceitas)
+        val uberLabel = if (stats.acceptedRidesUber > 0)
+            "${stats.totalRidesUber} (${stats.acceptedRidesUber} ✓)"
+        else "${stats.totalRidesUber}"
+        val ninetyNineLabel = if (stats.acceptedRides99 > 0)
+            "${stats.totalRides99} (${stats.acceptedRides99} ✓)"
+        else "${stats.totalRides99}"
+        card.findViewById<TextView>(R.id.tvRidesUber).text = uberLabel
+        card.findViewById<TextView>(R.id.tvRides99).text = ninetyNineLabel
 
         // Preço médio por plataforma
         card.findViewById<TextView>(R.id.tvAvgPriceUber).text =
@@ -570,29 +607,28 @@ class FloatingAnalyticsService : Service() {
         card.findViewById<TextView>(R.id.tvAvgTime99).text =
             if (stats.avgTime99 > 0) String.format("%.0f min", stats.avgTime99) else "—"
 
-        // Média por hora
-        card.findViewById<TextView>(R.id.tvSessionHourly).text =
-            if (stats.sessionAvgEarningsPerHour > 0)
-                String.format("R$ %.0f/h", stats.sessionAvgEarningsPerHour)
-            else "—"
-
-        // Preço médio geral
-        card.findViewById<TextView>(R.id.tvAvgPrice).text =
-            if (stats.avgPriceLast30Min > 0)
-                String.format("R$ %.2f", stats.avgPriceLast30Min)
-            else "—"
+        // Ofertas por hora por plataforma
+        card.findViewById<TextView>(R.id.tvSessionHourly).text = "${stats.offersPerHourUber}"
+        card.findViewById<TextView>(R.id.tvAvgPrice).text = "${stats.offersPerHour99}"
 
         // Footer: recomendação + qualidade das corridas aceitas
         val pauseBg = card.findViewById<FrameLayout>(R.id.pauseBackground)
         val tvPauseAdvice = card.findViewById<TextView>(R.id.tvPauseAdvice)
         val tvPauseReason = card.findViewById<TextView>(R.id.tvPauseReason)
         val tvLocation = card.findViewById<TextView>(R.id.tvLocation)
-        val tvPeakCurrent = card.findViewById<TextView>(R.id.tvPeakCurrent)
         val tvPeakNext = card.findViewById<TextView>(R.id.tvPeakNext)
 
-        // Texto principal do rodapé: usa a razão diretamente (sem título separado)
-        val mainReason = pauseRec.reasons.firstOrNull()?.replace("❓", "")?.replace("🔥", "")?.trim() ?: ""
-        if (stats.acceptedBelowAverage) {
+        // Verificar horários de baixa demanda (9h-11:30 e 14:30-16:30)
+        val minute = Calendar.getInstance().get(Calendar.MINUTE)
+        val timeInMinutes = hour * 60 + minute
+        val isLowDemandHour = (timeInMinutes in 540..690) || (timeInMinutes in 870..990)
+
+        // Texto principal do rodapé
+        val mainReason = pauseRec.reasons.firstOrNull()?.replace(Regex("[^\\p{L}\\p{M}\\p{N}\\p{P}\\p{Sc}\\s]"), "")?.trim() ?: ""
+        if (isLowDemandHour) {
+            tvPauseAdvice.text = "GUARDE O CARRO"
+            tvPauseReason.text = "Economize gasolina e energia mental"
+        } else if (stats.acceptedBelowAverage) {
             tvPauseAdvice.text = "ACEITE CORRIDAS MELHORES"
             tvPauseReason.text = "Suas corridas aceitas estão abaixo da média"
         } else if (pauseRec.shouldPause) {
@@ -607,31 +643,22 @@ class FloatingAnalyticsService : Service() {
         val regionName = marketInfo?.regionName ?: "Desconhecida"
         tvLocation.text = "Localização: $regionName"
 
-        // Horário de pico atual
-        val peakHours = marketInfo?.peakHoursToday ?: emptyList()
-        val isCurrentPeak = peakHours.contains(hour)
-        tvPeakCurrent.text = if (isCurrentPeak) {
-            "Pico atual: Sim (${hour}h)"
-        } else {
-            "Pico atual: Demanda Baixa"
-        }
-
         // Próximo pico — usa apenas o texto descritivo do PauseAdvisor
         val nextPeakInfo = PauseAdvisor.getNextPeakInfo(hour)
         tvPeakNext.text = nextPeakInfo
 
-        // Cor do fundo baseado na urgência
+        // Cor do fundo baseado na demanda hora-a-hora
         when {
+            isLowDemandHour ->
+                pauseBg.setBackgroundResource(R.drawable.bg_card_bad)
             stats.acceptedBelowAverage ->
                 pauseBg.setBackgroundResource(R.drawable.bg_card_neutral)
-            pauseRec.urgency == PauseAdvisor.PauseUrgency.CRITICAL ->
+            stats.ridesLastHour < stats.ridesPreviousHour -> // Demanda caindo
                 pauseBg.setBackgroundResource(R.drawable.bg_card_bad)
-            pauseRec.urgency == PauseAdvisor.PauseUrgency.RECOMMENDED ->
-                pauseBg.setBackgroundResource(R.drawable.bg_card_neutral)
-            pauseRec.urgency == PauseAdvisor.PauseUrgency.OPTIONAL ->
-                pauseBg.setBackgroundResource(R.drawable.bg_card_header)
-            else ->
+            stats.ridesLastHour > stats.ridesPreviousHour || stats.trend == DemandTracker.DemandTrend.RISING -> // Subindo
                 pauseBg.setBackgroundResource(R.drawable.bg_card_good)
+            else -> // Estável
+                pauseBg.setBackgroundResource(R.drawable.bg_card_neutral)
         }
 
         // Botão fechar
@@ -642,6 +669,11 @@ class FloatingAnalyticsService : Service() {
 
     private fun hideStatusCard() {
         handler.removeCallbacks(hideStatusCardRunnable)
+        // Remover overlay
+        statusCardOverlay?.let {
+            try { windowManager.removeView(it) } catch (_: Exception) { }
+        }
+        statusCardOverlay = null
         statusCard?.let { card ->
             card.animate()
                 .alpha(0f)
@@ -686,7 +718,7 @@ class FloatingAnalyticsService : Service() {
                 ?.start()
             // Resetar timer de auto-ocultar
             handler.removeCallbacks(hideCardRunnable)
-            handler.postDelayed(hideCardRunnable, 30000)
+            handler.postDelayed(hideCardRunnable, 10000)
             return
         }
 
@@ -739,9 +771,9 @@ class FloatingAnalyticsService : Service() {
                 ?.setInterpolator(android.view.animation.DecelerateInterpolator())
                 ?.start()
 
-            // Auto-ocultar após 30 segundos (mesmo tempo da solicitação de Uber/99)
+            // Auto-ocultar após 10 segundos
             handler.removeCallbacks(hideCardRunnable)
-            handler.postDelayed(hideCardRunnable, 30000)
+            handler.postDelayed(hideCardRunnable, 10000)
         } catch (e: Exception) {
             Log.e("FloatingAnalytics", "!!! ERRO ao adicionar card ao WindowManager!", e)
             e.printStackTrace()
@@ -783,9 +815,6 @@ class FloatingAnalyticsService : Service() {
             }
         }
 
-        // Score (só o número)
-        card.findViewById<TextView>(R.id.tvScore).text = "${analysis.score}"
-
         // Valor por KM (considerando buscar + destino)
         card.findViewById<TextView>(R.id.tvPricePerKm).text =
             String.format("R$ %.2f", valuePerKm)
@@ -794,13 +823,9 @@ class FloatingAnalyticsService : Service() {
         card.findViewById<TextView>(R.id.tvValuePerMin).text =
             String.format("R$ %.2f", valuePerMin)
 
-        // Km Buscar (pickup) — extraído da tela ou estimado por GPS
-        card.findViewById<TextView>(R.id.tvPickupDistance).text =
-            String.format("%.1f km", pickupDistance)
-
-        // Km Destino (corrida)
-        card.findViewById<TextView>(R.id.tvRideDistance).text =
-            String.format("%.1f km", analysis.rideData.distanceKm)
+        // Km Total (buscar + destino)
+        card.findViewById<TextView>(R.id.tvTotalDistance).text =
+            String.format("%.1f km", totalDistanceKm)
 
         // Recomendação com cor
         val tvRecommendation = card.findViewById<TextView>(R.id.tvRecommendation)
@@ -810,7 +835,7 @@ class FloatingAnalyticsService : Service() {
                 tvRecommendation.setTextColor(0xFF4CAF50.toInt())
             }
             Recommendation.NOT_WORTH_IT -> {
-                tvRecommendation.text = "NÃO COMPENSA"
+                tvRecommendation.text = "EVITAR"
                 tvRecommendation.setTextColor(0xFFF44336.toInt())
             }
             Recommendation.NEUTRAL -> {
@@ -818,10 +843,6 @@ class FloatingAnalyticsService : Service() {
                 tvRecommendation.setTextColor(0xFFFF9800.toInt())
             }
         }
-
-        // Motivo principal
-        card.findViewById<TextView>(R.id.tvReason).text =
-            analysis.reasons.firstOrNull() ?: ""
 
         // Botão de fechar
         card.findViewById<View>(R.id.btnClose).setOnClickListener {

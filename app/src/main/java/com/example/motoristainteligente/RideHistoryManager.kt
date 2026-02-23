@@ -127,7 +127,7 @@ class RideHistoryManager(context: Context) {
             pricePerKm = pricePerKm,
             earningsPerHour = earningsPerHour,
             score = score,
-            recommendation = if (score >= 60) "COMPENSA" else if (score >= 40) "NEUTRO" else "NÃO COMPENSA",
+            recommendation = if (score >= 60) "COMPENSA" else if (score >= 40) "NEUTRO" else "EVITAR",
             pickupDistanceKm = pickupDistanceKm
         )
         history.add(ride)

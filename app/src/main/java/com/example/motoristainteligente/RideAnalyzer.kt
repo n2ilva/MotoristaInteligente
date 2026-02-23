@@ -46,36 +46,19 @@ object RideAnalyzer {
         val timeFactor = getTimeOfDayFactor()
         val adjustedReference = referencePricePerKm / timeFactor
 
-        // Componentes do score
-        val priceScore = calculatePriceScore(effectivePricePerKm, adjustedReference)
-        val earningsScore = calculateEarningsScore(earningsPerHour)
-        val pickupScore = calculatePickupScore(pickupDistanceKm)
-        val timeBonus = calculateTimeBonus()
-
-        // Score final ponderado
-        val score = (priceScore * 0.40 +
-                earningsScore * 0.30 +
-                pickupScore * 0.20 +
-                timeBonus * 0.10).toInt().coerceIn(0, 100)
-
         // Verificar limites definidos pelo motorista
         val exceedsPickup = pickupDistanceKm > maxPickupDistanceKm
         val exceedsRideDistance = rideData.distanceKm > maxRideDistanceKm
-        val belowMinPriceKm = effectivePricePerKm < referencePricePerKm * 0.6
-        val belowMinHourly = earningsPerHour < minEarningsPerHour * 0.5
+        val belowMinPriceKm = effectivePricePerKm < referencePricePerKm
+        val belowMinHourly = earningsPerHour < minEarningsPerHour
 
-        // Se excede limites do motorista, penalizar score
-        var finalScore = score
-        if (exceedsPickup) finalScore = (finalScore * 0.6).toInt()
-        if (exceedsRideDistance) finalScore = (finalScore * 0.7).toInt()
-        finalScore = finalScore.coerceIn(0, 100)
-
-        // Recomendação (usa finalScore)
+        // Recomendação baseada diretamente nos parâmetros do motorista
         val recommendation = when {
             exceedsPickup || exceedsRideDistance -> Recommendation.NOT_WORTH_IT
-            finalScore >= 60 -> Recommendation.WORTH_IT
-            finalScore >= 40 -> Recommendation.NEUTRAL
-            else -> Recommendation.NOT_WORTH_IT
+            belowMinPriceKm -> Recommendation.NOT_WORTH_IT
+            belowMinHourly -> Recommendation.NOT_WORTH_IT
+            effectivePricePerKm >= referencePricePerKm * 1.1 && earningsPerHour >= minEarningsPerHour -> Recommendation.WORTH_IT
+            else -> Recommendation.NEUTRAL
         }
 
         // Motivos
@@ -92,44 +75,10 @@ object RideAnalyzer {
             referencePricePerKm = adjustedReference,
             estimatedEarningsPerHour = earningsPerHour,
             pickupDistanceKm = pickupDistanceKm,
-            score = finalScore,
+            score = 0,
             recommendation = recommendation,
             reasons = reasons
         )
-    }
-
-    private fun calculatePriceScore(effectivePrice: Double, reference: Double): Double {
-        if (reference <= 0) return 50.0
-        val ratio = effectivePrice / reference
-        return (ratio * 50).coerceIn(0.0, 100.0)
-    }
-
-    private fun calculateEarningsScore(earningsPerHour: Double): Double {
-        if (minEarningsPerHour <= 0) return 50.0
-        val ratio = earningsPerHour / minEarningsPerHour
-        return (ratio * 50).coerceIn(0.0, 100.0)
-    }
-
-    private fun calculatePickupScore(pickupDistanceKm: Double): Double {
-        return when {
-            pickupDistanceKm <= 1.0 -> 100.0
-            pickupDistanceKm <= 2.0 -> 80.0
-            pickupDistanceKm <= 3.0 -> 60.0
-            pickupDistanceKm <= 5.0 -> 40.0
-            pickupDistanceKm <= 8.0 -> 20.0
-            else -> 5.0
-        }
-    }
-
-    private fun calculateTimeBonus(): Double {
-        val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
-        return when (hour) {
-            in 7..9 -> 80.0     // Rush matutino
-            in 17..20 -> 90.0   // Rush noturno (melhor)
-            in 22..23, in 0..5 -> 70.0  // Madrugada (possível surge)
-            in 11..13 -> 60.0   // Almoço
-            else -> 40.0        // Fora de pico
-        }
     }
 
     private fun getTimeOfDayFactor(): Double {

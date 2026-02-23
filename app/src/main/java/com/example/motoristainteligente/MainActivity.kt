@@ -962,7 +962,7 @@ fun DailyAnalyticsScreen() {
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         StatItem("R$/hora", String.format("%.0f", summary.avgEarningsPerHour))
-                        StatItem("Score médio", String.format("%.0f", summary.avgScore))
+                        StatItem("R$/km médio", String.format("%.2f", summary.avgPricePerKm))
                         StatItem("Tempo", "${summary.totalTimeMin} min")
                     }
                 }
@@ -1073,7 +1073,7 @@ fun WeeklyComparisonScreen() {
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         StatItem("R$/h médio", String.format("%.0f", weekSummary.avgEarningsPerHour))
-                        StatItem("Score médio", String.format("%.0f", weekSummary.avgScore))
+                        StatItem("R$/km médio", String.format("%.2f", weekSummary.avgPricePerKm))
                         StatItem("Corrida média", String.format("R$ %.0f", weekSummary.avgRidePrice))
                     }
                 }
@@ -1948,16 +1948,16 @@ fun ScoreLegendItem(color: Color, label: String, tag: String) {
 
 @Composable
 fun RideHistoryItem(ride: RideHistoryManager.AcceptedRide) {
-    val scoreColor = when {
-        ride.score >= 60 -> Color(0xFF4CAF50)
-        ride.score >= 40 -> Color(0xFFFF9800)
-        else -> Color(0xFFF44336)
+    val recColor = when (ride.recommendation) {
+        "COMPENSA" -> Color(0xFF4CAF50)
+        "EVITAR" -> Color(0xFFF44336)
+        else -> Color(0xFFFF9800)
     }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = scoreColor.copy(alpha = 0.06f)
+            containerColor = recColor.copy(alpha = 0.06f)
         )
     ) {
         Row(
@@ -1966,18 +1966,22 @@ fun RideHistoryItem(ride: RideHistoryManager.AcceptedRide) {
                 .padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Score badge
+            // Recomendação badge
             Box(
                 modifier = Modifier
                     .size(44.dp)
-                    .background(scoreColor.copy(alpha = 0.2f), RoundedCornerShape(10.dp)),
+                    .background(recColor.copy(alpha = 0.2f), RoundedCornerShape(10.dp)),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = "${ride.score}",
-                    fontSize = 16.sp,
+                    text = when (ride.recommendation) {
+                        "COMPENSA" -> "✓"
+                        "EVITAR" -> "✗"
+                        else -> "~"
+                    },
+                    fontSize = 20.sp,
                     fontWeight = FontWeight.Bold,
-                    color = scoreColor
+                    color = recColor
                 )
             }
 
@@ -1997,7 +2001,7 @@ fun RideHistoryItem(ride: RideHistoryManager.AcceptedRide) {
                         text = String.format("R$ %.2f", ride.price),
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold,
-                        color = scoreColor
+                        color = recColor
                     )
                 }
                 Row(

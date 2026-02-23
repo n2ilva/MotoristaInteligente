@@ -17,9 +17,9 @@ import java.util.concurrent.CopyOnWriteArrayList
  */
 object DemandTracker {
 
-    // Histórico das últimas corridas recebidas (até 50)
+    // Histórico das últimas corridas recebidas (até 200 para 2h de dados)
     private val rideHistory = CopyOnWriteArrayList<RideSnapshot>()
-    private const val MAX_HISTORY = 50
+    private const val MAX_HISTORY = 200
 
     // Janelas de tempo para análise (em milissegundos)
     private const val WINDOW_SHORT = 15 * 60 * 1000L   // 15 min
@@ -65,16 +65,25 @@ object DemandTracker {
         val sessionDurationMin: Long,
         val sessionTotalEarnings: Double,
         val sessionAvgEarningsPerHour: Double,
-        // Per-platform stats
+        // Per-platform stats (ofertas recebidas)
         val totalRidesUber: Int,
         val totalRides99: Int,
         val avgPriceUber: Double,
         val avgPrice99: Double,
         val avgTimeUber: Double,
         val avgTime99: Double,
+        // Per-platform stats (corridas ACEITAS)
+        val acceptedRidesUber: Int,
+        val acceptedRides99: Int,
+        val acceptedRidesTotal: Int,
         // Accepted rides quality
         val acceptedBelowAverage: Boolean,
-        val noRidesLast15Min: Boolean
+        val noRidesLast15Min: Boolean,
+        // Ofertas por hora por plataforma
+        val offersPerHourUber: Int,
+        val offersPerHour99: Int,
+        // Ofertas na hora anterior (para comparação hora-a-hora)
+        val ridesPreviousHour: Int
     )
 
     enum class DemandTrend(val displayText: String, val emoji: String) {
@@ -136,6 +145,28 @@ object DemandTracker {
     }
 
     /**
+     * Marca a oferta mais recente de um determinado app como aceita.
+     * Chamado quando o serviço de acessibilidade detecta sinais de aceitação
+     * (tela mudou para modo "a caminho", "corrida aceita", etc.)
+     */
+    fun markLastOfferAsAccepted(appSource: AppSource): Boolean {
+        // Procurar a oferta mais recente (não aceita) desse app nos últimos 60s
+        val now = System.currentTimeMillis()
+        val candidate = rideHistory.lastOrNull {
+            it.appSource == appSource && !it.wasAccepted && (now - it.timestamp) < 60_000L
+        } ?: return false
+
+        // Substituir com wasAccepted = true
+        val idx = rideHistory.indexOf(candidate)
+        if (idx >= 0) {
+            rideHistory[idx] = candidate.copy(wasAccepted = true)
+            recordRideAccepted(candidate.price)
+            return true
+        }
+        return false
+    }
+
+    /**
      * Calcula as estatísticas atuais de demanda.
      */
     fun getStats(): DemandStats {
@@ -157,8 +188,14 @@ object DemandTracker {
         val avgPriceKm30 = last30.map { it.pricePerKm }.averageOrZero()
         val avgTime30 = last30.map { it.estimatedTimeMin.toDouble() }.averageOrZero()
 
+        val previousHour = rideHistory.filter { now - it.timestamp in WINDOW_LONG..(WINDOW_LONG * 2) }
+
         val ridesUber30 = last30.count { it.appSource == AppSource.UBER }
         val rides9930 = last30.count { it.appSource == AppSource.NINETY_NINE }
+
+        // Ofertas por hora por plataforma
+        val offersPerHourUber = lastHour.count { it.appSource == AppSource.UBER }
+        val offersPerHour99 = lastHour.count { it.appSource == AppSource.NINETY_NINE }
 
         // Per-platform metrics (all history)
         val uberRides = rideHistory.filter { it.appSource == AppSource.UBER }
@@ -191,6 +228,11 @@ object DemandTracker {
         val sessionMin = if (sessionStartTime > 0) (now - sessionStartTime) / (60 * 1000) else 0
         val sessionAvgPerHour = if (sessionHours > 0.1) totalEarnings / sessionHours else 0.0
 
+        // Corridas aceitas por plataforma
+        val acceptedUber = rideHistory.count { it.appSource == AppSource.UBER && it.wasAccepted }
+        val accepted99 = rideHistory.count { it.appSource == AppSource.NINETY_NINE && it.wasAccepted }
+        val acceptedTotal = acceptedUber + accepted99
+
         return DemandStats(
             ridesLast15Min = last15.size,
             ridesLast30Min = last30.size,
@@ -215,25 +257,34 @@ object DemandTracker {
             avgPrice99 = avgPrice99,
             avgTimeUber = avgTimeUber,
             avgTime99 = avgTime99,
+            acceptedRidesUber = acceptedUber,
+            acceptedRides99 = accepted99,
+            acceptedRidesTotal = acceptedTotal,
             acceptedBelowAverage = acceptedBelowAvg,
-            noRidesLast15Min = last15.isEmpty()
+            noRidesLast15Min = last15.isEmpty(),
+            offersPerHourUber = offersPerHourUber,
+            offersPerHour99 = offersPerHour99,
+            ridesPreviousHour = previousHour.size
         )
     }
 
     /**
-     * Calcula tendência de demanda comparando duas janelas de 30 min.
+     * Calcula tendência de demanda comparando ofertas hora-a-hora.
+     * Compara a hora atual com a hora anterior.
      */
     private fun calculateDemandTrend(now: Long): DemandTrend {
-        val recent = rideHistory.count {
-            now - it.timestamp in 0..WINDOW_MEDIUM
+        val currentHour = rideHistory.count {
+            now - it.timestamp in 0..WINDOW_LONG
         }
-        val previous = rideHistory.count {
-            now - it.timestamp in WINDOW_MEDIUM..(WINDOW_MEDIUM * 2)
+        val previousHour = rideHistory.count {
+            now - it.timestamp in WINDOW_LONG..(WINDOW_LONG * 2)
         }
 
         return when {
-            recent > previous + 2 -> DemandTrend.RISING
-            recent < previous - 2 -> DemandTrend.FALLING
+            previousHour == 0 && currentHour == 0 -> DemandTrend.STABLE
+            previousHour == 0 -> if (currentHour > 0) DemandTrend.RISING else DemandTrend.STABLE
+            currentHour > previousHour -> DemandTrend.RISING
+            currentHour < previousHour -> DemandTrend.FALLING
             else -> DemandTrend.STABLE
         }
     }

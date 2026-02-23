@@ -122,7 +122,7 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Corridas Uber"
+                    android:text="Ofertas Uber"
                     android:textColor="#AAAAAA"
                     android:textSize="11sp" />
 
@@ -145,7 +145,7 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Corridas 99"
+                    android:text="Ofertas 99"
                     android:textColor="#AAAAAA"
                     android:textSize="11sp" />
 
@@ -302,7 +302,7 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Média/h"
+                    android:text="Ofertas/h Uber"
                     android:textColor="#AAAAAA"
                     android:textSize="11sp" />
 
@@ -325,7 +325,7 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Preço médio geral"
+                    android:text="Ofertas/h 99"
                     android:textColor="#AAAAAA"
                     android:textSize="11sp" />
 
@@ -388,16 +388,6 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Localização: —"
-                android:textColor="#BBFFFFFF"
-                android:textSize="10sp"
-                android:gravity="center" />
-
-            <TextView
-                android:id="@+id/tvPeakCurrent"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
-                android:text="Pico atual: —"
                 android:textColor="#BBFFFFFF"
                 android:textSize="10sp"
                 android:gravity="center" />
