@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Motorista Inteligente</string>
+    <string name="accessibility_service_description">Motorista Inteligente analisa corridas do Uber e 99 para ajudar motoristas a decidir se uma corrida compensa ou não. O serviço lê informações de corridas exibidas na tela para calcular preço por km, distância, tempo e rentabilidade.</string>
+</resources>
