@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
+import android.location.Geocoder
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -23,6 +24,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import java.util.Calendar
+import java.util.Locale
 
 /**
  * Serviço flutuante que:
@@ -54,6 +56,8 @@ class FloatingAnalyticsService : Service() {
     private var statusCardOverlay: View? = null
     private var isCardVisible = false
     private var isStatusCardVisible = false
+    private var lastResolvedCity: String? = null
+    private var lastResolvedNeighborhood: String? = null
 
     private val handler = Handler(Looper.getMainLooper())
     private val hideCardRunnable = Runnable { hideAnalysisCard() }
@@ -64,6 +68,14 @@ class FloatingAnalyticsService : Service() {
         override fun run() {
             updateNotificationWithStats()
             handler.postDelayed(this, 60_000) // A cada 1 min
+        }
+    }
+
+    // Atualização periódica de localização do motorista (a cada 15 min)
+    private val locationUpdateRunnable = object : Runnable {
+        override fun run() {
+            updateDriverLocationInFirebase()
+            handler.postDelayed(this, 15 * 60 * 1000L) // A cada 15 min
         }
     }
 
@@ -127,6 +139,9 @@ class FloatingAnalyticsService : Service() {
         // Iniciar atualização periódica da notificação com stats
         handler.post(notificationUpdateRunnable)
 
+        // Iniciar atualização periódica de localização (a cada 15 min)
+        handler.post(locationUpdateRunnable)
+
         return START_STICKY
     }
 
@@ -140,6 +155,10 @@ class FloatingAnalyticsService : Service() {
             if (stats.sessionDurationMin > 1) {
                 firestoreManager.saveSessionSummary(stats)
             }
+        } catch (_: Exception) { }
+        // Remover localização do motorista (offline)
+        try {
+            firestoreManager.removeDriverLocation()
         } catch (_: Exception) { }
         locationHelper.stopLocationUpdates()
         marketDataService.stop()
@@ -207,6 +226,43 @@ class FloatingAnalyticsService : Service() {
             val manager = getSystemService(NotificationManager::class.java)
             manager.notify(NOTIFICATION_ID, notification)
         } catch (_: Exception) { }
+    }
+
+    /**
+     * Atualiza a localização do motorista no Firebase a cada 15 min.
+     * Usa Geocoder para resolver cidade/bairro a partir das coordenadas GPS.
+     */
+    private fun updateDriverLocationInFirebase() {
+        val location = locationHelper.getCurrentLocation()
+        if (location == null) {
+            Log.w("FloatingAnalytics", "GPS indisponível para atualizar localização")
+            return
+        }
+
+        try {
+            val geocoder = Geocoder(this, Locale("pt", "BR"))
+            @Suppress("DEPRECATION")
+            val addresses = geocoder.getFromLocation(location.latitude, location.longitude, 1)
+            if (!addresses.isNullOrEmpty()) {
+                val addr = addresses[0]
+                val city = addr.locality ?: addr.subAdminArea ?: addr.adminArea
+                val neighborhood = addr.subLocality
+
+                if (!city.isNullOrBlank()) {
+                    lastResolvedCity = city
+                    lastResolvedNeighborhood = neighborhood
+                    firestoreManager.saveDriverLocation(
+                        city = city,
+                        neighborhood = neighborhood,
+                        latitude = location.latitude,
+                        longitude = location.longitude
+                    )
+                    Log.i("FloatingAnalytics", "Localização atualizada: $city / $neighborhood")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("FloatingAnalytics", "Geocoder falhou na atualização periódica", e)
+        }
     }
 
     // ========================
@@ -343,6 +399,37 @@ class FloatingAnalyticsService : Service() {
 
             // Registrar corrida no rastreador de demanda
             DemandTracker.recordRideOffer(rideData)
+
+            // Geocodificar localização atual para obter cidade/bairro
+            val location = locationHelper.getCurrentLocation()
+            var city: String? = null
+            var neighborhood: String? = null
+            if (location != null) {
+                try {
+                    val geocoder = Geocoder(this, Locale("pt", "BR"))
+                    @Suppress("DEPRECATION")
+                    val addresses = geocoder.getFromLocation(location.latitude, location.longitude, 1)
+                    if (!addresses.isNullOrEmpty()) {
+                        val addr = addresses[0]
+                        city = addr.locality ?: addr.subAdminArea ?: addr.adminArea
+                        neighborhood = addr.subLocality
+                        if (!city.isNullOrBlank()) {
+                            lastResolvedCity = city
+                            lastResolvedNeighborhood = neighborhood
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w("FloatingAnalytics", "Geocoder falhou ao obter cidade/bairro", e)
+                }
+            }
+
+            if (city.isNullOrBlank()) {
+                city = lastResolvedCity
+                neighborhood = neighborhood ?: lastResolvedNeighborhood
+            }
+
+            // Salvar oferta no Firebase para base de cálculo de demanda
+            firestoreManager.saveRideOffer(rideData, city, neighborhood)
 
             // Pulsar o botão flutuante para indicar nova corrida
             pulseFloatingButton()
@@ -805,6 +892,11 @@ class FloatingAnalyticsService : Service() {
         val valuePerKm = analysis.rideData.ridePrice / totalDistanceKm
         val valuePerMin = analysis.rideData.ridePrice / totalTimeMin
 
+        Log.i("FloatingAnalytics", ">>> CARD: preço=R$ ${analysis.rideData.ridePrice}, " +
+            "corrida=${analysis.rideData.distanceKm}km/${analysis.rideData.estimatedTimeMin}min, " +
+            "pickup=${pickupDistance}km, total=${String.format("%.1f", totalDistanceKm)}km, " +
+            "R$/km=${String.format("%.2f", valuePerKm)}, source=${analysis.rideData.extractionSource}")
+
         // Fonte do app - ícone + texto
         card.findViewById<TextView>(R.id.tvAppSource).text = analysis.rideData.appSource.displayName
 
@@ -858,6 +950,12 @@ class FloatingAnalyticsService : Service() {
                 tvRecommendation.setTextColor(0xFFFF9800.toInt())
             }
         }
+
+        // Endereços de embarque e destino
+        val tvPickup = card.findViewById<TextView>(R.id.tvPickupAddress)
+        val tvDropoff = card.findViewById<TextView>(R.id.tvDropoffAddress)
+        tvPickup.text = analysis.rideData.pickupAddress.ifBlank { "Endereço não disponível" }
+        tvDropoff.text = analysis.rideData.dropoffAddress.ifBlank { "Destino não disponível" }
 
         // Botão de fechar
         card.findViewById<View>(R.id.btnClose).setOnClickListener {

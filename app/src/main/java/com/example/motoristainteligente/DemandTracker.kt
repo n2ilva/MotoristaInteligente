@@ -317,6 +317,29 @@ object DemandTracker {
     fun getRideCount(): Int = rideHistory.size
     fun getSessionStartTime(): Long = sessionStartTime
 
+    /**
+     * Restaura o histórico de ofertas do dia a partir de dados do Firebase.
+     * Chamado ao abrir o app para que os cards mostrem dados do dia atual,
+     * mesmo que o serviço não esteja ativo.
+     * Só restaura se o histórico atual estiver vazio (evita duplicatas).
+     */
+    fun restoreFromFirebase(offers: List<RideSnapshot>) {
+        if (rideHistory.isNotEmpty()) return // já tem dados na memória
+        if (offers.isEmpty()) return
+
+        rideHistory.addAll(offers.sortedBy { it.timestamp })
+
+        // Limitar histórico
+        while (rideHistory.size > MAX_HISTORY) {
+            rideHistory.removeAt(0)
+        }
+
+        // Se não tem sessão ativa, marcar o timestamp da oferta mais antiga como início
+        if (sessionStartTime == 0L) {
+            sessionStartTime = offers.minOf { it.timestamp }
+        }
+    }
+
     private fun List<Double>.averageOrZero(): Double {
         return if (isEmpty()) 0.0 else average()
     }
