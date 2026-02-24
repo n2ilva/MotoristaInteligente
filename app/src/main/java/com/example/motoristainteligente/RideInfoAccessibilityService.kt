@@ -499,6 +499,10 @@ class RideInfoAccessibilityService : AccessibilityService() {
      * Para esses apps, OCR é a ÚNICA via funcional de extração.
      */
     private fun ensureFloatingServiceRunning() {
+        if (!AnalysisServiceState.isEnabled(this)) {
+            return
+        }
+
         try {
             val intent = Intent(this, FloatingAnalyticsService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -624,6 +628,11 @@ class RideInfoAccessibilityService : AccessibilityService() {
         val runnable = object : Runnable {
             override fun run() {
                 if (!isServiceConnected) return
+
+                if (!AnalysisServiceState.isEnabled(this@RideInfoAccessibilityService)) {
+                    debounceHandler.postDelayed(this, HEALTH_CHECK_INTERVAL_MS)
+                    return
+                }
 
                 val instance = FloatingAnalyticsService.instance
                 if (instance == null) {
@@ -1042,6 +1051,13 @@ class RideInfoAccessibilityService : AccessibilityService() {
                             val priceStr = priceMatch.groupValues[1].replace(",", ".")
                             val price = priceStr.toDoubleOrNull()
                             if (price != null && price >= MIN_RIDE_PRICE) {
+                                if (!hasStrongOfferSignalForPriceOnly(nodeOfferFallback)) {
+                                    if (allowOcrFallback) {
+                                        requestOcrFallbackForOffer(packageName, "node-price-only-without-strong-signal")
+                                    }
+                                    return
+                                }
+
                                 // === DEDUP PERSISTENTE: earnings card Uber repete o mesmo preço continuamente ===
                                 val nowDedup = System.currentTimeMillis()
                                 val isSuppressedPrice =
@@ -1161,6 +1177,21 @@ class RideInfoAccessibilityService : AccessibilityService() {
             "windows" -> "windows"
             else -> "node-tree"
         }
+    }
+
+    private fun hasStrongOfferSignalForPriceOnly(text: String): Boolean {
+        val hasActionKeyword = ACTION_KEYWORDS.any { text.contains(it, ignoreCase = true) }
+        if (hasActionKeyword) return true
+
+        val hasOfferContextKeyword = CONTEXT_KEYWORDS.any { text.contains(it, ignoreCase = true) }
+        if (hasOfferContextKeyword) return true
+
+        return text.contains("nova viagem", ignoreCase = true) ||
+            text.contains("novo pedido", ignoreCase = true) ||
+            text.contains("solicitação", ignoreCase = true) ||
+            text.contains("request", ignoreCase = true) ||
+            text.contains("trip", ignoreCase = true) ||
+            text.contains("ride", ignoreCase = true)
     }
 
     private fun looksLikeStructuralIdOnlyText(text: String): Boolean {

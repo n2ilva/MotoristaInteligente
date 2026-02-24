@@ -236,11 +236,13 @@ class MainActivity : ComponentActivity() {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
         val intent = Intent(this, FloatingAnalyticsService::class.java)
+        AnalysisServiceState.setEnabled(this, true)
         startForegroundService(intent)
         Toast.makeText(this, "Análise de corridas iniciada!", Toast.LENGTH_SHORT).show()
     }
 
     private fun stopFloatingService() {
+        AnalysisServiceState.setEnabled(this, false)
         stopService(Intent(this, FloatingAnalyticsService::class.java))
         Toast.makeText(this, "Serviço parado", Toast.LENGTH_SHORT).show()
     }
@@ -2218,18 +2220,46 @@ fun LoginScreen(
                 scope.launch {
                     try {
                         val credentialManager = androidx.credentials.CredentialManager.create(context)
-                        val googleIdOption = com.google.android.libraries.identity.googleid.GetGoogleIdOption.Builder()
-                            .setFilterByAuthorizedAccounts(false)
-                            .setServerClientId("742389314956-kbdu2kajfdfiitbeetekdrcikomgj07g.apps.googleusercontent.com")
-                            .build()
-                        val request = androidx.credentials.GetCredentialRequest.Builder()
-                            .addCredentialOption(googleIdOption)
-                            .build()
+                        val serverClientId = context.getString(R.string.default_web_client_id)
 
-                        val result = credentialManager.getCredential(
-                            context = context as Activity,
-                            request = request
-                        )
+                        if (serverClientId.isBlank()) {
+                            throw IllegalStateException("default_web_client_id não encontrado. Verifique o google-services.json")
+                        }
+
+                        val activity = context as Activity
+
+                        val result = try {
+                            // Tenta primeiro contas já autorizadas (fluxo mais rápido)
+                            val authorizedOption = com.google.android.libraries.identity.googleid.GetGoogleIdOption.Builder()
+                                .setFilterByAuthorizedAccounts(true)
+                                .setServerClientId(serverClientId)
+                                .build()
+
+                            val authorizedRequest = androidx.credentials.GetCredentialRequest.Builder()
+                                .addCredentialOption(authorizedOption)
+                                .build()
+
+                            credentialManager.getCredential(
+                                context = activity,
+                                request = authorizedRequest
+                            )
+                        } catch (_: androidx.credentials.exceptions.NoCredentialException) {
+                            // Sem credenciais autorizadas: abrir seletor de contas Google
+                            val anyAccountOption = com.google.android.libraries.identity.googleid.GetGoogleIdOption.Builder()
+                                .setFilterByAuthorizedAccounts(false)
+                                .setServerClientId(serverClientId)
+                                .build()
+
+                            val anyAccountRequest = androidx.credentials.GetCredentialRequest.Builder()
+                                .addCredentialOption(anyAccountOption)
+                                .build()
+
+                            credentialManager.getCredential(
+                                context = activity,
+                                request = anyAccountRequest
+                            )
+                        }
+
                         val credential = result.credential
                         val googleIdTokenCredential = com.google.android.libraries.identity.googleid.GoogleIdTokenCredential.createFrom(credential.data)
                         val idToken = googleIdTokenCredential.idToken
@@ -2249,6 +2279,9 @@ fun LoginScreen(
                     } catch (e: androidx.credentials.exceptions.GetCredentialCancellationException) {
                         isLoading = false
                         // Usuário cancelou, não mostrar erro
+                    } catch (e: androidx.credentials.exceptions.NoCredentialException) {
+                        isLoading = false
+                        errorMessage = "Nenhuma credencial Google disponível neste aparelho. Verifique se há conta Google adicionada e Play Services atualizado."
                     } catch (e: Exception) {
                         isLoading = false
                         errorMessage = "Erro: ${e.localizedMessage}"

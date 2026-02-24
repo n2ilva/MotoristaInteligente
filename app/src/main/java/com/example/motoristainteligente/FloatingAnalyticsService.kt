@@ -124,9 +124,17 @@ class FloatingAnalyticsService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            AnalysisServiceState.setEnabled(this, false)
             stopSelf()
             return START_NOT_STICKY
         }
+
+        if (!AnalysisServiceState.isEnabled(this)) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        AnalysisServiceState.setEnabled(this, true)
 
         createNotificationChannel()
         startForeground(
@@ -142,7 +150,7 @@ class FloatingAnalyticsService : Service() {
         // Iniciar atualização periódica de localização (a cada 15 min)
         handler.post(locationUpdateRunnable)
 
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

@@ -14,3 +14,11 @@
 .cxx
 local.properties
 node_modules/
+
+# Diretórios locais de cache/daemon (não versionar)
+/android/
+/caches/
+/daemon/
+/kotlin-profile/
+/native/
+/wrapper/
