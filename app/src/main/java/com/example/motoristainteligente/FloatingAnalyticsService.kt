@@ -25,6 +25,7 @@ import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import java.util.Calendar
 import java.util.Locale
+import kotlin.math.roundToInt
 
 /**
  * Serviço flutuante que:
@@ -39,9 +40,13 @@ class FloatingAnalyticsService : Service() {
     companion object {
         var instance: FloatingAnalyticsService? = null
         const val CHANNEL_ID = "motorista_inteligente_channel"
+        const val ALERT_CHANNEL_ID = "motorista_inteligente_alerts"
         const val NOTIFICATION_ID = 1001
+        const val ALERT_NOTIFICATION_ID_UPCOMING = 2001
+        const val ALERT_NOTIFICATION_ID_DECLINING = 2002
         const val ACTION_STOP = "com.example.motoristainteligente.STOP_SERVICE"
         private const val RIDE_DEBOUNCE_MS = 300L // 300ms para agrupar eventos rápidos
+        private const val NO_OFFERS_ALERT_WINDOW_MS = 15 * 60 * 1000L
     }
 
     private lateinit var windowManager: WindowManager
@@ -56,8 +61,11 @@ class FloatingAnalyticsService : Service() {
     private var statusCardOverlay: View? = null
     private var isCardVisible = false
     private var isStatusCardVisible = false
+    private var onlineSessionStartMs: Long = 0L
     private var lastResolvedCity: String? = null
     private var lastResolvedNeighborhood: String? = null
+    private var lastUpcomingAlertKey: String? = null
+    private var lastDecliningAlertKey: String? = null
 
     private val handler = Handler(Looper.getMainLooper())
     private val hideCardRunnable = Runnable { hideAnalysisCard() }
@@ -67,6 +75,7 @@ class FloatingAnalyticsService : Service() {
     private val notificationUpdateRunnable = object : Runnable {
         override fun run() {
             updateNotificationWithStats()
+            maybeNotifyPeakEvents()
             handler.postDelayed(this, 60_000) // A cada 1 min
         }
     }
@@ -135,8 +144,12 @@ class FloatingAnalyticsService : Service() {
         }
 
         AnalysisServiceState.setEnabled(this, true)
+        if (onlineSessionStartMs == 0L) {
+            onlineSessionStartMs = System.currentTimeMillis()
+        }
 
         createNotificationChannel()
+        createPeakAlertsChannel()
         startForeground(
             NOTIFICATION_ID,
             createNotification(),
@@ -162,6 +175,13 @@ class FloatingAnalyticsService : Service() {
             val stats = DemandTracker.getStats()
             if (stats.sessionDurationMin > 1) {
                 firestoreManager.saveSessionSummary(stats)
+                firestoreManager.saveDriverDailyDemandAnalytics(
+                    demandStats = stats,
+                    city = lastResolvedCity,
+                    neighborhood = lastResolvedNeighborhood,
+                    onlineStartMs = onlineSessionStartMs,
+                    onlineEndMs = System.currentTimeMillis()
+                )
             }
         } catch (_: Exception) { }
         // Remover localização do motorista (offline)
@@ -193,7 +213,23 @@ class FloatingAnalyticsService : Service() {
         manager.createNotificationChannel(channel)
     }
 
+    private fun createPeakAlertsChannel() {
+        val channel = NotificationChannel(
+            ALERT_CHANNEL_ID,
+            "Alertas de Pico",
+            NotificationManager.IMPORTANCE_DEFAULT
+        ).apply {
+            description = "Alertas de pico chegando e pico diminuindo"
+        }
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(channel)
+    }
+
     private fun createNotification(): Notification {
+        return createNotification("Iniciando análise...")
+    }
+
+    private fun createNotification(contentText: String): Notification {
         val stopIntent = Intent(this, FloatingAnalyticsService::class.java).apply {
             action = ACTION_STOP
         }
@@ -207,13 +243,6 @@ class FloatingAnalyticsService : Service() {
             this, 0, openIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-
-        val stats = DemandTracker.getStats()
-        val contentText = when (stats.trend) {
-            DemandTracker.DemandTrend.RISING -> "Demanda subindo"
-            DemandTracker.DemandTrend.FALLING -> "Demanda caindo"
-            DemandTracker.DemandTrend.STABLE -> "Demanda estável"
-        }
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Motorista Inteligente")
@@ -230,10 +259,138 @@ class FloatingAnalyticsService : Service() {
      */
     private fun updateNotificationWithStats() {
         try {
-            val notification = createNotification()
             val manager = getSystemService(NotificationManager::class.java)
-            manager.notify(NOTIFICATION_ID, notification)
+
+            if (!firestoreManager.isGoogleUser) {
+                manager.notify(NOTIFICATION_ID, createNotification("Login necessário"))
+                return
+            }
+
+            firestoreManager.loadTodayRideOfferStats { firebaseStats ->
+                val status = computeFirebaseDemandStatus(firebaseStats)
+                manager.notify(NOTIFICATION_ID, createNotification(status.notificationLabel))
+            }
         } catch (_: Exception) { }
+    }
+
+    private data class FirebaseDemandStatus(
+        val cardLabel: String,
+        val notificationLabel: String,
+        val color: Int
+    )
+
+    private data class CurrentTimeInfo(
+        val hour: Int,
+        val minute: Int,
+        val dayOfWeek: Int
+    )
+
+    private fun currentTimeInfo(): CurrentTimeInfo {
+        val now = Calendar.getInstance()
+        return CurrentTimeInfo(
+            hour = now.get(Calendar.HOUR_OF_DAY),
+            minute = now.get(Calendar.MINUTE),
+            dayOfWeek = now.get(Calendar.DAY_OF_WEEK)
+        )
+    }
+
+    private fun computeFirebaseDemandStatus(stats: FirestoreManager.RideOfferStats): FirebaseDemandStatus {
+        if (stats.totalOffersToday == 0 || stats.offersLast3h == 0) {
+            return FirebaseDemandStatus(
+                cardLabel = "Neutro",
+                notificationLabel = "Neutro",
+                color = 0xFFFFC107.toInt()
+            )
+        }
+
+        val lastHour = stats.offersLast1h
+        val previousHourEstimated = ((stats.offersLast3h - lastHour).coerceAtLeast(0) / 2.0)
+
+        return when {
+            lastHour > previousHourEstimated * 1.10 -> FirebaseDemandStatus(
+                cardLabel = "Alta",
+                notificationLabel = "Alta",
+                color = 0xFF4CAF50.toInt()
+            )
+            lastHour < previousHourEstimated * 0.90 -> FirebaseDemandStatus(
+                cardLabel = "Baixa",
+                notificationLabel = "Baixa",
+                color = 0xFFF44336.toInt()
+            )
+            else -> FirebaseDemandStatus(
+                cardLabel = "Neutro",
+                notificationLabel = "Neutro",
+                color = 0xFFFFC107.toInt()
+            )
+        }
+    }
+
+    private fun maybeNotifyPeakEvents() {
+        try {
+            val now = currentTimeInfo()
+
+            val city = lastResolvedCity ?: marketDataService.getLastMarketInfo()?.regionName
+            val signal = PauseAdvisor.getCityPeakSignal(
+                cityName = city,
+                hour = now.hour,
+                minute = now.minute,
+                dayOfWeek = now.dayOfWeek
+            )
+
+            if (!signal.supportedCity || city.isNullOrBlank()) return
+
+            val normalizedCity = city.trim()
+
+            val minutesToNextPeak = signal.minutesToNextPeak
+            if (!signal.inPeakNow && minutesToNextPeak != null && minutesToNextPeak in 1..20) {
+                val key = "${normalizedCity}_${now.dayOfWeek}_${signal.nextPeakLabel ?: ""}"
+                if (lastUpcomingAlertKey != key) {
+                    sendPeakAlertNotification(
+                        id = ALERT_NOTIFICATION_ID_UPCOMING,
+                        title = "Pico chegando em ${minutesToNextPeak} min",
+                        message = "$normalizedCity: ${signal.nextPeakLabel ?: "horário de pico"}. Hora de ganhar dinheiro."
+                    )
+                    lastUpcomingAlertKey = key
+                }
+            }
+
+            val minutesToPeakEnd = signal.minutesToPeakEnd
+            if (signal.inPeakNow && minutesToPeakEnd != null && minutesToPeakEnd in 0..10) {
+                val key = "${normalizedCity}_${now.dayOfWeek}_${signal.activePeakLabel ?: ""}"
+                if (lastDecliningAlertKey != key) {
+                    sendPeakAlertNotification(
+                        id = ALERT_NOTIFICATION_ID_DECLINING,
+                        title = "Pico diminuindo",
+                        message = "$normalizedCity: faltam ${minutesToPeakEnd} min para o fim do pico. Considere pausa estratégica."
+                    )
+                    lastDecliningAlertKey = key
+                }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun sendPeakAlertNotification(id: Int, title: String, message: String) {
+        val openIntent = Intent(this, MainActivity::class.java)
+        val openPendingIntent = PendingIntent.getActivity(
+            this,
+            id,
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_analytics)
+            .setContentTitle(title)
+            .setContentText(message)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setAutoCancel(true)
+            .setContentIntent(openPendingIntent)
+            .build()
+
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.notify(id, notification)
     }
 
     /**
@@ -432,8 +589,15 @@ class FloatingAnalyticsService : Service() {
             }
 
             if (city.isNullOrBlank()) {
-                city = lastResolvedCity
+                city = lastResolvedCity ?: marketDataService.getLastMarketInfo()?.regionName
                 neighborhood = neighborhood ?: lastResolvedNeighborhood
+                if (!city.isNullOrBlank()) {
+                    lastResolvedCity = city
+                }
+            }
+
+            if (city.isNullOrBlank()) {
+                Log.w("FloatingAnalytics", "Oferta detectada sem cidade resolvida — demanda regional pode não contabilizar")
             }
 
             // Salvar oferta no Firebase para base de cálculo de demanda
@@ -646,7 +810,10 @@ class FloatingAnalyticsService : Service() {
         val location = locationHelper.getCurrentLocation()
         val marketInfo = marketDataService.getLastMarketInfo()
         val pauseRec = PauseAdvisor.analyze(stats, location, marketInfo)
-        val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+        val now = currentTimeInfo()
+        val hour = now.hour
+
+        bindStatusCardCloseAction(card)
 
         // Tempo de sessão
         val hours = stats.sessionDurationMin / 60
@@ -654,72 +821,53 @@ class FloatingAnalyticsService : Service() {
         card.findViewById<TextView>(R.id.tvSessionTime).text =
             if (hours > 0) "${hours}h ${mins}min" else "${mins}min"
 
+        val isGoogleLoggedIn = firestoreManager.isGoogleUser
+        if (!isGoogleLoggedIn) {
+            applyLoggedOutStatusCardState(card)
+            return
+        }
+
         // Demanda: baseada na comparação hora-a-hora
-        val demandText: String
-        val demandColor: Int
-        when {
-            stats.ridesPreviousHour == 0 && stats.ridesLastHour == 0 -> {
-                demandText = "Sem dados"
-                demandColor = 0xFF9E9E9E.toInt()
+        firestoreManager.loadTodayRideOfferStats { firebaseStats ->
+            val demandStatus = computeFirebaseDemandStatus(firebaseStats)
+            val offersLast1h = firebaseStats.offersLast1h
+
+            card.findViewById<TextView>(R.id.tvDemandLevel).apply {
+                text = demandStatus.cardLabel
+                setTextColor(demandStatus.color)
             }
-            stats.ridesPreviousHour == 0 -> {
-                demandText = "Coletando dados"
-                demandColor = 0xFFFFC107.toInt()
+
+            val layoutAlert = card.findViewById<LinearLayout>(R.id.layoutNoRidesAlert)
+            val dividerAlert = card.findViewById<View>(R.id.dividerAfterAlert)
+            val noRecentOffers = firebaseStats.lastOfferTimestamp <= 0L ||
+                (System.currentTimeMillis() - firebaseStats.lastOfferTimestamp) > NO_OFFERS_ALERT_WINDOW_MS
+            if (noRecentOffers) {
+                layoutAlert.visibility = View.VISIBLE
+                dividerAlert.visibility = View.VISIBLE
+            } else {
+                layoutAlert.visibility = View.GONE
+                dividerAlert.visibility = View.GONE
             }
-            stats.ridesLastHour > stats.ridesPreviousHour -> {
-                demandText = "Demanda subindo"
-                demandColor = 0xFF4CAF50.toInt()
-            }
-            stats.ridesLastHour < stats.ridesPreviousHour -> {
-                demandText = "Demanda caindo"
-                demandColor = 0xFFF44336.toInt()
-            }
-            else -> {
-                demandText = "Demanda estável"
-                demandColor = 0xFFFFC107.toInt()
-            }
+
+            card.findViewById<TextView>(R.id.tvRidesUber).text = "${firebaseStats.offersUber}"
+            card.findViewById<TextView>(R.id.tvRides99).text = "${firebaseStats.offers99}"
+
+            card.findViewById<TextView>(R.id.tvAvgPriceUber).text =
+                if (firebaseStats.avgPriceUber > 0) String.format("R$ %.2f", firebaseStats.avgPriceUber) else "—"
+            card.findViewById<TextView>(R.id.tvAvgPrice99).text =
+                if (firebaseStats.avgPrice99 > 0) String.format("R$ %.2f", firebaseStats.avgPrice99) else "—"
+
+            card.findViewById<TextView>(R.id.tvAvgTimeUber).text =
+                if (firebaseStats.avgEstimatedTimeMinUber > 0) String.format("%.0f min", firebaseStats.avgEstimatedTimeMinUber) else "—"
+            card.findViewById<TextView>(R.id.tvAvgTime99).text =
+                if (firebaseStats.avgEstimatedTimeMin99 > 0) String.format("%.0f min", firebaseStats.avgEstimatedTimeMin99) else "—"
+
+            val total = firebaseStats.totalOffersToday.coerceAtLeast(1)
+            val uberPerHour = (offersLast1h * (firebaseStats.offersUber.toDouble() / total.toDouble())).roundToInt()
+            val ninetyNinePerHour = (offersLast1h * (firebaseStats.offers99.toDouble() / total.toDouble())).roundToInt()
+            card.findViewById<TextView>(R.id.tvSessionHourly).text = "${uberPerHour.coerceAtLeast(0)}"
+            card.findViewById<TextView>(R.id.tvAvgPrice).text = "${ninetyNinePerHour.coerceAtLeast(0)}"
         }
-        card.findViewById<TextView>(R.id.tvDemandLevel).apply {
-            text = demandText
-            setTextColor(demandColor)
-        }
-
-        // Alerta: sem corridas nos últimos 15 minutos
-        val layoutAlert = card.findViewById<LinearLayout>(R.id.layoutNoRidesAlert)
-        val dividerAlert = card.findViewById<View>(R.id.dividerAfterAlert)
-        if (stats.noRidesLast15Min) {
-            layoutAlert.visibility = View.VISIBLE
-            dividerAlert.visibility = View.VISIBLE
-        } else {
-            layoutAlert.visibility = View.GONE
-            dividerAlert.visibility = View.GONE
-        }
-
-        // Corridas por plataforma (ofertas / aceitas)
-        val uberLabel = if (stats.acceptedRidesUber > 0)
-            "${stats.totalRidesUber} (${stats.acceptedRidesUber} ✓)"
-        else "${stats.totalRidesUber}"
-        val ninetyNineLabel = if (stats.acceptedRides99 > 0)
-            "${stats.totalRides99} (${stats.acceptedRides99} ✓)"
-        else "${stats.totalRides99}"
-        card.findViewById<TextView>(R.id.tvRidesUber).text = uberLabel
-        card.findViewById<TextView>(R.id.tvRides99).text = ninetyNineLabel
-
-        // Preço médio por plataforma
-        card.findViewById<TextView>(R.id.tvAvgPriceUber).text =
-            if (stats.avgPriceUber > 0) String.format("R$ %.2f", stats.avgPriceUber) else "—"
-        card.findViewById<TextView>(R.id.tvAvgPrice99).text =
-            if (stats.avgPrice99 > 0) String.format("R$ %.2f", stats.avgPrice99) else "—"
-
-        // Tempo médio por plataforma
-        card.findViewById<TextView>(R.id.tvAvgTimeUber).text =
-            if (stats.avgTimeUber > 0) String.format("%.0f min", stats.avgTimeUber) else "—"
-        card.findViewById<TextView>(R.id.tvAvgTime99).text =
-            if (stats.avgTime99 > 0) String.format("%.0f min", stats.avgTime99) else "—"
-
-        // Ofertas por hora por plataforma
-        card.findViewById<TextView>(R.id.tvSessionHourly).text = "${stats.offersPerHourUber}"
-        card.findViewById<TextView>(R.id.tvAvgPrice).text = "${stats.offersPerHour99}"
 
         // Footer: recomendação + qualidade das corridas aceitas
         val pauseBg = card.findViewById<FrameLayout>(R.id.pauseBackground)
@@ -727,20 +875,31 @@ class FloatingAnalyticsService : Service() {
         val tvPauseReason = card.findViewById<TextView>(R.id.tvPauseReason)
         val tvLocation = card.findViewById<TextView>(R.id.tvLocation)
         val tvPeakNext = card.findViewById<TextView>(R.id.tvPeakNext)
+        val tvPeakTips = card.findViewById<TextView>(R.id.tvPeakTips)
 
         // Verificar horários de baixa demanda (9h-11:30 e 14:30-16:30)
-        val minute = Calendar.getInstance().get(Calendar.MINUTE)
-        val timeInMinutes = hour * 60 + minute
+        val timeInMinutes = hour * 60 + now.minute
         val isLowDemandHour = (timeInMinutes in 540..690) || (timeInMinutes in 870..990)
+
+        val detectedCity = lastResolvedCity ?: marketInfo?.regionName
+        val cityGuidance = PauseAdvisor.getCityPeakGuidance(
+            cityName = detectedCity,
+            hour = hour,
+            minute = now.minute,
+            dayOfWeek = now.dayOfWeek
+        )
 
         // Texto principal do rodapé
         val mainReason = pauseRec.reasons.firstOrNull()?.replace(Regex("[^\\p{L}\\p{M}\\p{N}\\p{P}\\p{Sc}\\s]"), "")?.trim() ?: ""
-        if (isLowDemandHour) {
+        if (cityGuidance.shouldPauseNow && !cityGuidance.inPeakNow) {
+            tvPauseAdvice.text = "PAUSA ESTRATÉGICA"
+            tvPauseReason.text = "Retorne no próximo pico"
+        } else if (isLowDemandHour) {
             tvPauseAdvice.text = "GUARDE O CARRO"
-            tvPauseReason.text = "Economize gasolina e energia mental"
+            tvPauseReason.text = "Baixa demanda agora"
         } else if (stats.acceptedBelowAverage) {
             tvPauseAdvice.text = "ACEITE CORRIDAS MELHORES"
-            tvPauseReason.text = "Suas corridas aceitas estão abaixo da média"
+            tvPauseReason.text = "Selecione melhor por km"
         } else if (pauseRec.shouldPause) {
             tvPauseAdvice.text = "PAUSAR AGORA"
             tvPauseReason.text = mainReason
@@ -749,13 +908,23 @@ class FloatingAnalyticsService : Service() {
             tvPauseReason.text = ""
         }
 
+        tvPauseReason.visibility = if (tvPauseReason.text.isNullOrBlank()) View.GONE else View.VISIBLE
+
         // Localização do motorista
         val regionName = marketInfo?.regionName ?: "Desconhecida"
-        tvLocation.text = "Localização: $regionName"
+        tvLocation.text = regionName
 
-        // Próximo pico — usa apenas o texto descritivo do PauseAdvisor
-        val nextPeakInfo = PauseAdvisor.getNextPeakInfo(hour)
-        tvPeakNext.text = nextPeakInfo
+        val compactPeak = cityGuidance.nextPeakText
+            .replace("Próximo pico:", "", ignoreCase = true)
+            .trim()
+        tvPeakNext.text = "Pico: ${compactPeak.ifBlank { "—" }}"
+
+        val compactTip = cityGuidance.tipText
+            .substringBefore('.')
+            .trim()
+            .take(64)
+        tvPeakTips.text = compactTip
+        tvPeakTips.visibility = if (compactTip.isBlank()) View.GONE else View.VISIBLE
 
         // Cor do fundo baseado na demanda hora-a-hora
         when {
@@ -771,10 +940,46 @@ class FloatingAnalyticsService : Service() {
                 pauseBg.setBackgroundResource(R.drawable.bg_card_neutral)
         }
 
-        // Botão fechar
+    }
+
+    private fun bindStatusCardCloseAction(card: View) {
         card.findViewById<View>(R.id.btnCloseStatus).setOnClickListener {
             hideStatusCard()
         }
+    }
+
+    private fun applyLoggedOutStatusCardState(card: View) {
+        card.findViewById<TextView>(R.id.tvDemandLevel).apply {
+            text = "Login necessário"
+            setTextColor(0xFFFFC107.toInt())
+        }
+
+        card.findViewById<LinearLayout>(R.id.layoutNoRidesAlert).visibility = View.GONE
+        card.findViewById<View>(R.id.dividerAfterAlert).visibility = View.GONE
+
+        card.findViewById<TextView>(R.id.tvRidesUber).text = "—"
+        card.findViewById<TextView>(R.id.tvRides99).text = "—"
+        card.findViewById<TextView>(R.id.tvAvgPriceUber).text = "—"
+        card.findViewById<TextView>(R.id.tvAvgPrice99).text = "—"
+        card.findViewById<TextView>(R.id.tvAvgTimeUber).text = "—"
+        card.findViewById<TextView>(R.id.tvAvgTime99).text = "—"
+        card.findViewById<TextView>(R.id.tvSessionHourly).text = "—"
+        card.findViewById<TextView>(R.id.tvAvgPrice).text = "—"
+
+        val pauseBg = card.findViewById<FrameLayout>(R.id.pauseBackground)
+        val tvPauseAdvice = card.findViewById<TextView>(R.id.tvPauseAdvice)
+        val tvPauseReason = card.findViewById<TextView>(R.id.tvPauseReason)
+        val tvLocation = card.findViewById<TextView>(R.id.tvLocation)
+        val tvPeakNext = card.findViewById<TextView>(R.id.tvPeakNext)
+        val tvPeakTips = card.findViewById<TextView>(R.id.tvPeakTips)
+
+        tvPauseAdvice.text = "ENTRE COM GOOGLE"
+        tvPauseReason.text = "Faça login para liberar a análise"
+        tvLocation.text = "—"
+        tvPeakNext.text = "Pico: login"
+        tvPeakTips.text = ""
+        tvPeakTips.visibility = View.GONE
+        pauseBg.setBackgroundResource(R.drawable.bg_card_neutral)
     }
 
     private fun hideStatusCard() {

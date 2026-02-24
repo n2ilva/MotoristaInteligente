@@ -1,3 +1,5 @@
+@file:Suppress("DEPRECATION")
+
 package com.example.motoristainteligente
 
 import android.app.Activity
@@ -50,6 +52,9 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.ElectricCar
 import androidx.compose.material.icons.filled.EvStation
+import androidx.compose.material.icons.filled.TrendingDown
+import androidx.compose.material.icons.filled.TrendingFlat
+import androidx.compose.material.icons.filled.TrendingUp
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Lightbulb
@@ -59,6 +64,7 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.ArrowDropUp
 import androidx.compose.material.icons.filled.MonetizationOn
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Remove
@@ -111,12 +117,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.credentials.ClearCredentialStateRequest
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.motoristainteligente.ui.theme.MotoristainteligenteTheme
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.GoogleAuthProvider
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.util.Locale
 
 // ===============================================
 // Definição das telas do menu
@@ -129,6 +139,31 @@ enum class Screen(val title: String, val icon: ImageVector) {
     PERMISSIONS("Permissões", Icons.Default.Lock),
     TIPS("Dicas de Uso", Icons.Default.Lightbulb),
     LOGIN("Login", Icons.Default.Person)
+}
+
+private const val HIGH_DEMAND_THRESHOLD_PER_MINUTE = 5.0
+
+private data class DemandTrendUi(
+    val color: Color,
+    val icon: ImageVector
+)
+
+private fun toOffersPerMinute(offersInWindow: Int): Double = offersInWindow / 10.0
+
+private fun resolveDemandTrendUi(offersPerMinute: Double): DemandTrendUi {
+    val trendColor = when {
+        offersPerMinute <= 0.0 -> Color(0xFF757575)
+        offersPerMinute > HIGH_DEMAND_THRESHOLD_PER_MINUTE -> Color(0xFFD32F2F)
+        else -> Color(0xFF2E7D32)
+    }
+
+    val trendIcon = when {
+        offersPerMinute > HIGH_DEMAND_THRESHOLD_PER_MINUTE -> Icons.Default.TrendingUp
+        offersPerMinute < HIGH_DEMAND_THRESHOLD_PER_MINUTE -> Icons.Default.TrendingDown
+        else -> Icons.Default.TrendingFlat
+    }
+
+    return DemandTrendUi(color = trendColor, icon = trendIcon)
 }
 
 // ===============================================
@@ -705,42 +740,7 @@ fun HomeScreen(
 
                 // Botões de teste (só quando serviço ativo)
                 if (isServiceRunning) {
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    Text(
-                        text = "Testar o card de análise:",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                    )
-
-                    Spacer(modifier = Modifier.height(6.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        OutlinedButton(
-                            onClick = {
-                                FloatingAnalyticsService.instance?.simulateRide(AppSource.UBER)
-                            },
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text("Testar Uber", fontSize = 13.sp)
-                        }
-
-                        OutlinedButton(
-                            onClick = {
-                                FloatingAnalyticsService.instance?.simulateRide(AppSource.NINETY_NINE)
-                            },
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text("Testar 99", fontSize = 13.sp)
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(10.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
 
                     // Status dos serviços
                     val isAccessibilityActive = RideInfoAccessibilityService.isServiceConnected
@@ -1238,58 +1238,28 @@ fun DaySummaryCard(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DemandByRegionScreen(firestoreManager: FirestoreManager?) {
-
     var cities by remember { mutableStateOf<List<String>>(emptyList()) }
-    var neighborhoods by remember { mutableStateOf<List<String>>(emptyList()) }
+    var cityDemandMini by remember { mutableStateOf<List<FirestoreManager.CityDemandMini>>(emptyList()) }
     var selectedCity by remember { mutableStateOf<String?>(null) }
-    var selectedNeighborhood by remember { mutableStateOf<String?>(null) }
-    var stats by remember { mutableStateOf<FirestoreManager.RegionalDemandStats?>(null) }
-    var recentOffers by remember { mutableStateOf<List<FirestoreManager.RegionalOffer>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
-    var isCityDropdownExpanded by remember { mutableStateOf(false) }
-    var isNeighborhoodDropdownExpanded by remember { mutableStateOf(false) }
+    var expandedCityCard by remember { mutableStateOf<String?>(null) }
 
-    // Carregar cidades ao montar (combina ofertas + motoristas online)
     LaunchedEffect(Unit) {
-        firestoreManager?.loadAvailableCitiesWithDrivers { loadedCities ->
-            cities = loadedCities
+        if (firestoreManager == null) {
             isLoading = false
+            return@LaunchedEffect
         }
-    }
 
-    // Carregar bairros quando cidade selecionada muda
-    LaunchedEffect(selectedCity) {
-        val city = selectedCity
-        if (city != null) {
-            selectedNeighborhood = null
-            stats = null
-            recentOffers = emptyList()
-            firestoreManager?.loadNeighborhoodsForCity(city) { loadedNeighborhoods ->
-                neighborhoods = loadedNeighborhoods
+        while (true) {
+            firestoreManager.loadAvailableCitiesWithDrivers { loadedCities ->
+                cities = loadedCities
+                firestoreManager.loadCityDemandMini(loadedCities) { mini ->
+                    cityDemandMini = mini
+                    isLoading = false
+                }
             }
-            // Carregar stats da cidade inteira
-            firestoreManager?.loadRegionalDemandStats(city) { loadedStats ->
-                stats = loadedStats
-            }
-            // Carregar ofertas individuais recentes
-            firestoreManager?.loadRecentRegionalOffers(city) { offers ->
-                recentOffers = offers
-            }
-        } else {
-            neighborhoods = emptyList()
-            stats = null
-            recentOffers = emptyList()
-        }
-    }
 
-    // Recarregar stats quando bairro selecionado muda
-    LaunchedEffect(selectedNeighborhood) {
-        val city = selectedCity ?: return@LaunchedEffect
-        firestoreManager?.loadRegionalDemandStats(city, selectedNeighborhood) { loadedStats ->
-            stats = loadedStats
-        }
-        firestoreManager?.loadRecentRegionalOffers(city, selectedNeighborhood) { offers ->
-            recentOffers = offers
+            delay(20_000)
         }
     }
 
@@ -1300,16 +1270,15 @@ fun DemandByRegionScreen(firestoreManager: FirestoreManager?) {
             .verticalScroll(rememberScrollState())
     ) {
         Text(
-            text = "Dados coletados pelos motoristas da plataforma nas últimas 24h",
+            text = "Demanda regional agregada dos últimos 10 minutos (todos os motoristas)",
             fontSize = 14.sp,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
         )
 
         Spacer(modifier = Modifier.height(20.dp))
 
-        // ========== FILTRO: CIDADE ==========
         Text(
-            text = "Cidade",
+            text = "Cidades",
             fontSize = 13.sp,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
@@ -1324,7 +1293,10 @@ fun DemandByRegionScreen(firestoreManager: FirestoreManager?) {
                     strokeWidth = 2.dp
                 )
             }
-        } else if (cities.isEmpty()) {
+            return@Column
+        }
+
+        if (cities.isEmpty() && cityDemandMini.isEmpty()) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
@@ -1332,605 +1304,156 @@ fun DemandByRegionScreen(firestoreManager: FirestoreManager?) {
                 )
             ) {
                 Text(
-                    text = "Nenhuma cidade com dados disponíveis ainda.\nAtive o serviço e dirija para começar a coletar dados.",
+                    text = "Sem dados de demanda para os últimos 10 minutos.",
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                     modifier = Modifier.padding(16.dp),
                     textAlign = TextAlign.Center
                 )
             }
-        } else {
-            // Dropdown de Cidade
-            Box {
-                OutlinedButton(
-                    onClick = { isCityDropdownExpanded = true },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Text(
-                        text = selectedCity ?: "Selecione uma cidade",
-                        modifier = Modifier.weight(1f),
-                        textAlign = TextAlign.Start
-                    )
-                    Icon(
-                        imageVector = Icons.Default.ArrowDropDown,
-                        contentDescription = null
-                    )
-                }
-                androidx.compose.material3.DropdownMenu(
-                    expanded = isCityDropdownExpanded,
-                    onDismissRequest = { isCityDropdownExpanded = false }
-                ) {
-                    cities.forEach { city ->
-                        androidx.compose.material3.DropdownMenuItem(
-                            text = { Text(city) },
-                            onClick = {
-                                selectedCity = city
-                                isCityDropdownExpanded = false
-                            }
-                        )
-                    }
-                }
-            }
+            return@Column
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
+        val miniByCity = cityDemandMini.associateBy { it.city }
+        val allCities = (cities + cityDemandMini.map { it.city }).distinct()
+        val sortedCities = allCities.sortedWith(
+            compareByDescending<String> { city -> miniByCity[city]?.offersLast15m ?: 0 }
+                .thenBy { it }
+        )
 
-        // ========== FILTRO: BAIRRO ==========
-        if (selectedCity != null) {
-            Text(
-                text = "Bairro",
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                letterSpacing = 1.sp
-            )
-            Spacer(modifier = Modifier.height(6.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            sortedCities.forEach { city ->
+                val cityMini = miniByCity[city]
+                val offersLast15m = cityMini?.offersLast15m ?: 0
+                val offersPerMinute = toOffersPerMinute(offersLast15m)
+                val cityTrendUi = resolveDemandTrendUi(offersPerMinute)
+                val isExpanded = expandedCityCard == city
 
-            if (neighborhoods.isEmpty()) {
-                Text(
-                    text = "Carregando bairros...",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
-                )
-            } else {
-                Box {
-                    OutlinedButton(
-                        onClick = { isNeighborhoodDropdownExpanded = true },
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Text(
-                            text = selectedNeighborhood ?: "Todos os bairros",
-                            modifier = Modifier.weight(1f),
-                            textAlign = TextAlign.Start
-                        )
-                        Icon(
-                            imageVector = Icons.Default.ArrowDropDown,
-                            contentDescription = null
-                        )
-                    }
-                    androidx.compose.material3.DropdownMenu(
-                        expanded = isNeighborhoodDropdownExpanded,
-                        onDismissRequest = { isNeighborhoodDropdownExpanded = false }
-                    ) {
-                        // Opção "Todos"
-                        androidx.compose.material3.DropdownMenuItem(
-                            text = { Text("Todos os bairros") },
-                            onClick = {
-                                selectedNeighborhood = null
-                                isNeighborhoodDropdownExpanded = false
-                            }
-                        )
-                        neighborhoods.forEach { bairro ->
-                            androidx.compose.material3.DropdownMenuItem(
-                                text = { Text(bairro) },
-                                onClick = {
-                                    selectedNeighborhood = bairro
-                                    isNeighborhoodDropdownExpanded = false
-                                }
-                            )
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(24.dp))
-        }
-
-        // ========== RESULTADOS ==========
-        val currentStats = stats
-        if (selectedCity != null && currentStats != null && currentStats.loaded) {
-            if (currentStats.totalOffers == 0) {
                 Card(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            selectedCity = city
+                            expandedCityCard = if (isExpanded) null else city
+                        },
                     colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-                    )
-                ) {
-                    Column(
-                        modifier = Modifier.padding(20.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text("📭", fontSize = 40.sp)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "Sem ofertas nas últimas 24h",
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            text = if (selectedNeighborhood != null) "para $selectedNeighborhood, $selectedCity"
-                                   else "para $selectedCity",
-                            fontSize = 13.sp,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                        )
-                    }
-                }
-            } else {
-                // Título da região
-                val regionLabel = if (selectedNeighborhood != null)
-                    "$selectedNeighborhood, $selectedCity" else selectedCity!!
-                Text(
-                    text = regionLabel,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF4CAF50)
-                )
-                Text(
-                    text = "${currentStats.totalOffers} ofertas · ${currentStats.activeDrivers} motoristas (24h) · ${currentStats.onlineDrivers} online agora",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                )
-
-                Spacer(modifier = Modifier.height(20.dp))
-
-                // ---- Card: Motoristas Online ----
-                if (currentStats.onlineDrivers > 0) {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(
-                            containerColor = Color(0xFF4CAF50).copy(alpha = 0.08f)
-                        ),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-                        shape = RoundedCornerShape(16.dp)
-                    ) {
-                        Column(modifier = Modifier.padding(20.dp)) {
-                            Text(
-                                text = "MOTORISTAS ONLINE",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                                letterSpacing = 1.sp
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "🟢",
-                                    fontSize = 16.sp
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = "${currentStats.onlineDrivers} motorista${if (currentStats.onlineDrivers > 1) "s" else ""} ativo${if (currentStats.onlineDrivers > 1) "s" else ""} agora",
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF4CAF50)
-                                )
-                            }
-                            Text(
-                                text = "Localização atualizada a cada 15 minutos via GPS",
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
-                                modifier = Modifier.padding(top = 4.dp)
-                            )
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(12.dp))
-                }
-
-                // ---- Card: Demanda Recente ----
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surface
+                        containerColor = cityTrendUi.color.copy(alpha = 0.10f)
                     ),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-                    shape = RoundedCornerShape(16.dp)
+                    shape = RoundedCornerShape(12.dp),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
                 ) {
-                    Column(modifier = Modifier.padding(20.dp)) {
-                        Text(
-                            text = "ATIVIDADE RECENTE",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                            letterSpacing = 1.sp
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
+                    Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceEvenly
-                        ) {
-                            RegionalStatColumn("Última 1h", "${currentStats.offersLast1h}", "ofertas")
-                            RegionalStatColumn("Últimas 3h", "${currentStats.offersLast3h}", "ofertas")
-                            RegionalStatColumn("24h", "${currentStats.totalOffers}", "total")
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // ---- Card: Preços Médios ----
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surface
-                    ),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-                    shape = RoundedCornerShape(16.dp)
-                ) {
-                    Column(modifier = Modifier.padding(20.dp)) {
-                        Text(
-                            text = "PREÇOS MÉDIOS",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                            letterSpacing = 1.sp
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Column {
-                                Text(
-                                    text = "Preço médio",
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                                )
-                                Text(
-                                    text = String.format("R$ %.2f", currentStats.avgPrice),
-                                    fontSize = 22.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = Color(0xFF4CAF50)
-                                )
-                            }
+                            Text(
+                                text = city,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Icon(
+                                imageVector = cityTrendUi.icon,
+                                contentDescription = null,
+                                tint = cityTrendUi.color,
+                                modifier = Modifier.padding(horizontal = 6.dp)
+                            )
                             Column(horizontalAlignment = Alignment.End) {
                                 Text(
-                                    text = "R$/km médio",
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                                )
-                                Text(
-                                    text = String.format("R$ %.2f", currentStats.avgPricePerKm),
-                                    fontSize = 22.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = Color(0xFF2196F3)
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(1.dp)
-                                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
-                        )
-
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column {
-                                Text(
-                                    text = "Melhor R$/km",
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                                )
-                                Text(
-                                    text = String.format("R$ %.2f", currentStats.bestPricePerKm),
-                                    fontSize = 16.sp,
+                                    text = String.format(Locale.US, "%.1f/min", offersPerMinute),
+                                    fontSize = 13.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF4CAF50)
+                                    color = cityTrendUi.color
+                                )
+                                Text(
+                                    text = "U:${cityMini?.offersUberLast15m ?: 0} · 99:${cityMini?.offers99Last15m ?: 0}",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                                )
+                                Text(
+                                    text = "Motoristas: ${cityMini?.activeDriversLast15m ?: 0}",
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.58f)
                                 )
                             }
-                            Column(horizontalAlignment = Alignment.End) {
+                            Icon(
+                                imageVector = if (isExpanded) Icons.Default.ArrowDropUp else Icons.Default.ArrowDropDown,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                            )
+                        }
+
+                        if (isExpanded) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            if (cityMini?.neighborhoods.isNullOrEmpty()) {
                                 Text(
-                                    text = "Pior R$/km",
+                                    text = "Sem bairros com ofertas nos últimos 10 minutos",
                                     fontSize = 12.sp,
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
                                 )
-                                Text(
-                                    text = String.format("R$ %.2f", currentStats.worstPricePerKm),
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFFF44336)
-                                )
-                            }
-                        }
-                    }
-                }
+                            } else {
+                                cityMini?.neighborhoods?.forEach { neighborhoodMini ->
+                                    val neighborhoodPerMinute = toOffersPerMinute(neighborhoodMini.offersLast15m)
+                                    val neighborhoodTrendUi = resolveDemandTrendUi(neighborhoodPerMinute)
 
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // ---- Card: Por App ----
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surface
-                    ),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-                    shape = RoundedCornerShape(16.dp)
-                ) {
-                    Column(modifier = Modifier.padding(20.dp)) {
-                        Text(
-                            text = "POR APLICATIVO",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                            letterSpacing = 1.sp
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        // Uber
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(8.dp)
-                                        .background(Color(0xFF000000), CircleShape)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("Uber", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                            }
-                            Text(
-                                text = "${currentStats.offersUber} ofertas",
-                                fontSize = 13.sp,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                            )
-                            Text(
-                                text = if (currentStats.avgPriceUber > 0) String.format("R$ %.2f", currentStats.avgPriceUber) else "—",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        // 99
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(8.dp)
-                                        .background(Color(0xFFFFAB00), CircleShape)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("99", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                            }
-                            Text(
-                                text = "${currentStats.offers99} ofertas",
-                                fontSize = 13.sp,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                            )
-                            Text(
-                                text = if (currentStats.avgPrice99 > 0) String.format("R$ %.2f", currentStats.avgPrice99) else "—",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // ---- Card: Distâncias ----
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surface
-                    ),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-                    shape = RoundedCornerShape(16.dp)
-                ) {
-                    Column(modifier = Modifier.padding(20.dp)) {
-                        Text(
-                            text = "DISTÂNCIAS E TEMPO",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                            letterSpacing = 1.sp
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceEvenly
-                        ) {
-                            RegionalStatColumn(
-                                "Distância",
-                                String.format("%.1f km", currentStats.avgDistanceKm),
-                                "média"
-                            )
-                            RegionalStatColumn(
-                                "Tempo",
-                                String.format("%.0f min", currentStats.avgEstimatedTimeMin),
-                                "média"
-                            )
-                            RegionalStatColumn(
-                                "Embarque",
-                                String.format("%.1f km", currentStats.avgPickupDistanceKm),
-                                "média"
-                            )
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // ---- Card: Últimas Ofertas Recebidas ----
-                if (recentOffers.isNotEmpty()) {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surface
-                        ),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-                        shape = RoundedCornerShape(16.dp)
-                    ) {
-                        Column(modifier = Modifier.padding(20.dp)) {
-                            Text(
-                                text = "ÚLTIMAS OFERTAS RECEBIDAS",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                                letterSpacing = 1.sp
-                            )
-                            Text(
-                                text = "Todas as ofertas detectadas na região (não apenas aceitas)",
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
-                            )
-                            Spacer(modifier = Modifier.height(12.dp))
-
-                            recentOffers.forEachIndexed { index, offer ->
-                                if (index > 0) {
-                                    Box(
+                                    Card(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .height(1.dp)
-                                            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f))
-                                    )
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                }
-
-                                val appColor = when {
-                                    offer.appSource.contains("Uber", ignoreCase = true) -> Color(0xFF000000)
-                                    offer.appSource.contains("99", ignoreCase = true) -> Color(0xFFFFAB00)
-                                    else -> Color.Gray
-                                }
-                                val timeFormat = java.text.SimpleDateFormat("HH:mm", java.util.Locale("pt", "BR"))
-                                val timeStr = timeFormat.format(java.util.Date(offer.timestamp))
-                                val pricePerKm = if (offer.distanceKm > 0) offer.ridePrice / offer.distanceKm else 0.0
-
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 4.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    // Indicador do app
-                                    Box(
-                                        modifier = Modifier
-                                            .size(8.dp)
-                                            .background(appColor, CircleShape)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-
-                                    // Info principal
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            .padding(vertical = 3.dp),
+                                        colors = CardDefaults.cardColors(
+                                            containerColor = neighborhoodTrendUi.color.copy(alpha = 0.10f)
+                                        ),
+                                        shape = RoundedCornerShape(10.dp),
+                                        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
                                             Text(
-                                                text = offer.appSource,
+                                                text = neighborhoodMini.neighborhood,
                                                 fontSize = 12.sp,
-                                                fontWeight = FontWeight.SemiBold
+                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                                                modifier = Modifier.weight(1f),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
                                             )
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                            Text(
-                                                text = timeStr,
-                                                fontSize = 11.sp,
-                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                                            Icon(
+                                                imageVector = neighborhoodTrendUi.icon,
+                                                contentDescription = null,
+                                                tint = neighborhoodTrendUi.color,
+                                                modifier = Modifier.padding(horizontal = 6.dp)
                                             )
-                                            if (offer.neighborhood.isNotBlank()) {
-                                                Spacer(modifier = Modifier.width(6.dp))
+                                            Column(horizontalAlignment = Alignment.End) {
                                                 Text(
-                                                    text = offer.neighborhood,
+                                                    text = String.format(Locale.US, "%.1f/min", neighborhoodPerMinute),
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = neighborhoodTrendUi.color
+                                                )
+                                                Text(
+                                                    text = "U:${neighborhoodMini.offersUberLast15m} · 99:${neighborhoodMini.offers99Last15m}",
                                                     fontSize = 10.sp,
-                                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f),
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
+                                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f)
                                                 )
-                                            }
-                                        }
-                                        Row {
-                                            if (offer.distanceKm > 0) {
                                                 Text(
-                                                    text = String.format("%.1f km", offer.distanceKm),
-                                                    fontSize = 11.sp,
-                                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                                                )
-                                                Spacer(modifier = Modifier.width(8.dp))
-                                            }
-                                            if (offer.estimatedTimeMin > 0) {
-                                                Text(
-                                                    text = String.format("%.0f min", offer.estimatedTimeMin),
-                                                    fontSize = 11.sp,
-                                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                                                )
-                                                Spacer(modifier = Modifier.width(8.dp))
-                                            }
-                                            if (offer.pickupDistanceKm > 0) {
-                                                Text(
-                                                    text = String.format("embarque %.1f km", offer.pickupDistanceKm),
-                                                    fontSize = 11.sp,
-                                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                                                    text = "Motoristas: ${neighborhoodMini.activeDriversLast15m}",
+                                                    fontSize = 9.sp,
+                                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.58f)
                                                 )
                                             }
-                                        }
-                                    }
-
-                                    // Preço
-                                    Column(horizontalAlignment = Alignment.End) {
-                                        Text(
-                                            text = String.format("R$ %.2f", offer.ridePrice),
-                                            fontSize = 14.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = Color(0xFF4CAF50)
-                                        )
-                                        if (pricePerKm > 0) {
-                                            Text(
-                                                text = String.format("R$ %.2f/km", pricePerKm),
-                                                fontSize = 10.sp,
-                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
-                                            )
                                         }
                                     }
                                 }
-                                Spacer(modifier = Modifier.height(4.dp))
                             }
                         }
                     }
                 }
-
-                Spacer(modifier = Modifier.height(24.dp))
-            }
-        } else if (selectedCity != null) {
-            // Loading
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 40.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                androidx.compose.material3.CircularProgressIndicator(
-                    modifier = Modifier.size(32.dp),
-                    strokeWidth = 3.dp,
-                    color = Color(0xFF4CAF50)
-                )
             }
         }
     }
@@ -2162,11 +1685,35 @@ fun LoginScreen(
     val scope = rememberCoroutineScope()
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var isGoogleLoggedIn by remember { mutableStateOf(firestoreManager.isGoogleUser) }
+
+    DisposableEffect(firestoreManager) {
+        val auth = FirebaseAuth.getInstance()
+        val listener = FirebaseAuth.AuthStateListener { firebaseAuth ->
+            isGoogleLoggedIn = firebaseAuth.currentUser?.providerData?.any {
+                it.providerId == GoogleAuthProvider.PROVIDER_ID
+            } == true
+        }
+
+        auth.addAuthStateListener(listener)
+        onDispose {
+            auth.removeAuthStateListener(listener)
+        }
+    }
 
     // Se já está logado com Google, mostrar tela de perfil
-    if (firestoreManager.isGoogleUser) {
+    if (isGoogleLoggedIn) {
         LoggedInScreen(firestoreManager = firestoreManager, onLogout = {
-            firestoreManager.signOut()
+            scope.launch {
+                try {
+                    val credentialManager = androidx.credentials.CredentialManager.create(context)
+                    credentialManager.clearCredentialState(ClearCredentialStateRequest())
+                } catch (_: Exception) {
+                }
+
+                firestoreManager.signOut()
+                isGoogleLoggedIn = false
+            }
         })
         return
     }
@@ -3085,13 +2632,19 @@ fun DemandMonitorCard(
     isServiceRunning: Boolean = false,
     firestoreManager: FirestoreManager? = null
 ) {
+    val isGoogleLoggedIn = firestoreManager?.isGoogleUser == true
+
     // Firebase stats — carrega ofertas do dia
     var firebaseStats by remember { mutableStateOf(FirestoreManager.RideOfferStats()) }
 
-    LaunchedEffect(firestoreManager) {
+    LaunchedEffect(firestoreManager, isGoogleLoggedIn) {
         while (true) {
-            firestoreManager?.loadTodayRideOfferStats { result ->
-                firebaseStats = result
+            if (isGoogleLoggedIn) {
+                firestoreManager?.loadTodayRideOfferStats { result ->
+                    firebaseStats = result
+                }
+            } else {
+                firebaseStats = FirestoreManager.RideOfferStats()
             }
             delay(15_000)
         }
@@ -3118,7 +2671,8 @@ fun DemandMonitorCard(
             Spacer(modifier = Modifier.height(4.dp))
 
             Text(
-                  text = if (hasFirebaseData) "Análise 100% Firebase (ofertas do dia)"
+                  text = if (!isGoogleLoggedIn) "Faça login com Google para visualizar demanda"
+                      else if (hasFirebaseData) "Análise 100% Firebase (ofertas do dia)"
                       else if (firebaseStats.loaded) "Sem ofertas na plataforma hoje"
                       else "Carregando dados da base...",
                 fontSize = 12.sp,
@@ -3127,17 +2681,38 @@ fun DemandMonitorCard(
 
             Spacer(modifier = Modifier.height(16.dp))
 
+            if (!isGoogleLoggedIn) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            Color(0xFFFFC107).copy(alpha = 0.18f),
+                            RoundedCornerShape(8.dp)
+                        )
+                        .padding(16.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "Dados de demanda indisponíveis sem login.\nEntre com Google para liberar o histórico e as métricas.",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
+                        textAlign = TextAlign.Center
+                    )
+                }
+                return@Column
+            }
+
             // ========== DADOS DO FIREBASE (histórico do dia) ==========
             if (hasFirebaseData) {
                 Text(
-                    text = "📊 Histórico do Dia",
+                    text = "Histórico do dia",
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = Color(0xFF1E88E5)
                 )
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // Total de ofertas hoje
+                // Totais
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceEvenly
@@ -3149,7 +2724,16 @@ fun DemandMonitorCard(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Breakdown por plataforma
+                Text(
+                    text = "POR PLATAFORMA",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                    letterSpacing = 1.sp
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Breakdown por plataforma (organizado em grid)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -3178,18 +2762,19 @@ fun DemandMonitorCard(
                                 fontSize = 15.sp,
                                 fontWeight = FontWeight.Bold
                             )
-                            if (firebaseStats.avgPriceUber > 0) {
-                                Text(
-                                    text = String.format("R$ %.0f média", firebaseStats.avgPriceUber),
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                                )
-                                Text(
-                                    text = String.format("R$ %.2f/km", firebaseStats.avgPricePerKmUber),
-                                    fontSize = 12.sp,
-                                    color = Color(0xFF4CAF50)
-                                )
-                            }
+
+                            Spacer(modifier = Modifier.height(6.dp))
+
+                            Text(
+                                text = "Médio: ${if (firebaseStats.avgPriceUber > 0) String.format("R$ %.2f", firebaseStats.avgPriceUber) else "—"}",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                            )
+                            Text(
+                                text = "${if (firebaseStats.avgPricePerKmUber > 0) String.format("R$ %.2f/km", firebaseStats.avgPricePerKmUber) else "—/km"} • ${if (firebaseStats.avgDistanceKmUber > 0) String.format("%.1f km", firebaseStats.avgDistanceKmUber) else "— km"} • ${if (firebaseStats.avgEstimatedTimeMinUber > 0) String.format("%.0f min", firebaseStats.avgEstimatedTimeMinUber) else "— min"}",
+                                fontSize = 11.sp,
+                                color = Color(0xFF4CAF50)
+                            )
                         }
                     }
 
@@ -3217,80 +2802,20 @@ fun DemandMonitorCard(
                                 fontSize = 15.sp,
                                 fontWeight = FontWeight.Bold
                             )
-                            if (firebaseStats.avgPrice99 > 0) {
-                                Text(
-                                    text = String.format("R$ %.0f média", firebaseStats.avgPrice99),
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                                )
-                                Text(
-                                    text = String.format("R$ %.2f/km", firebaseStats.avgPricePerKm99),
-                                    fontSize = 12.sp,
-                                    color = Color(0xFFFF6F00)
-                                )
-                            }
+
+                            Spacer(modifier = Modifier.height(6.dp))
+
+                            Text(
+                                text = "Médio: ${if (firebaseStats.avgPrice99 > 0) String.format("R$ %.2f", firebaseStats.avgPrice99) else "—"}",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                            )
+                            Text(
+                                text = "${if (firebaseStats.avgPricePerKm99 > 0) String.format("R$ %.2f/km", firebaseStats.avgPricePerKm99) else "—/km"} • ${if (firebaseStats.avgDistanceKm99 > 0) String.format("%.1f km", firebaseStats.avgDistanceKm99) else "— km"} • ${if (firebaseStats.avgEstimatedTimeMin99 > 0) String.format("%.0f min", firebaseStats.avgEstimatedTimeMin99) else "— min"}",
+                                fontSize = 11.sp,
+                                color = Color(0xFFFF6F00)
+                            )
                         }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Médias gerais do dia
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column {
-                        Text(
-                            text = "PREÇO MÉDIO/KM",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                            letterSpacing = 1.sp
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = if (firebaseStats.avgPricePerKm > 0)
-                                String.format("R$ %.2f", firebaseStats.avgPricePerKm)
-                            else "—",
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF1E88E5)
-                        )
-                    }
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            text = "DISTÂNCIA MÉDIA",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                            letterSpacing = 1.sp
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = if (firebaseStats.avgDistanceKm > 0)
-                                String.format("%.1f km", firebaseStats.avgDistanceKm)
-                            else "—",
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                    Column(horizontalAlignment = Alignment.End) {
-                        Text(
-                            text = "TEMPO MÉDIO",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                            letterSpacing = 1.sp
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = if (firebaseStats.avgEstimatedTimeMin > 0)
-                                String.format("%.0f min", firebaseStats.avgEstimatedTimeMin)
-                            else "—",
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold
-                        )
                     }
                 }
 

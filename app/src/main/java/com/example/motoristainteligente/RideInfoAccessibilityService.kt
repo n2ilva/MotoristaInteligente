@@ -192,6 +192,10 @@ class RideInfoAccessibilityService : AccessibilityService() {
             "novo pedido", "nova viagem", "solicitação", "request"
         )
 
+        private val UBER_NOTIFICATION_RIDE_KEYWORDS = listOf(
+            "viagem", "corrida", "pedido", "trip", "request", "ride", "delivery", "entrega"
+        )
+
         // Contexto de corrida (origem/destino/passageiro)
         private val CONTEXT_KEYWORDS = listOf(
             "embarque", "destino", "passageiro", "pickup", "dropoff", "origem", "entrega"
@@ -377,20 +381,32 @@ class RideInfoAccessibilityService : AccessibilityService() {
         "r\\$", "reais"
     )
 
-    private fun shouldLogEvent(key: String): Boolean {
+    private fun String.isOwnPackageName(): Boolean {
+        return this == OWN_PACKAGE || this.startsWith(OWN_PACKAGE)
+    }
+
+    private fun shouldLogWithThrottle(
+        cache: MutableMap<String, Long>,
+        key: String,
+        throttleMs: Long
+    ): Boolean {
         val now = System.currentTimeMillis()
-        val last = lastEventLogAt[key] ?: 0L
-        if (now - last < EVENT_LOG_THROTTLE_MS) return false
-        lastEventLogAt[key] = now
+        val last = cache[key] ?: 0L
+        if (now - last < throttleMs) return false
+        cache[key] = now
         return true
     }
 
+    private fun containsAnyIgnoreCase(text: String, keywords: List<String>): Boolean {
+        return keywords.any { keyword -> text.contains(keyword, ignoreCase = true) }
+    }
+
+    private fun shouldLogEvent(key: String): Boolean {
+        return shouldLogWithThrottle(lastEventLogAt, key, EVENT_LOG_THROTTLE_MS)
+    }
+
     private fun shouldLogDiagnostic(key: String): Boolean {
-        val now = System.currentTimeMillis()
-        val last = lastDiagnosticLogAt[key] ?: 0L
-        if (now - last < DIAGNOSTIC_LOG_THROTTLE_MS) return false
-        lastDiagnosticLogAt[key] = now
-        return true
+        return shouldLogWithThrottle(lastDiagnosticLogAt, key, DIAGNOSTIC_LOG_THROTTLE_MS)
     }
 
     override fun onServiceConnected() {
@@ -404,7 +420,7 @@ class RideInfoAccessibilityService : AccessibilityService() {
     }
 
     private fun isMonitoredPackage(packageName: String): Boolean {
-        if (packageName == OWN_PACKAGE) return false
+        if (packageName.isOwnPackageName()) return false
         if (packageName in ALL_MONITORED) return true
 
         if (ALL_MONITORED.any { packageName.startsWith(it) }) return true
@@ -477,13 +493,11 @@ class RideInfoAccessibilityService : AccessibilityService() {
                 val rootPkg = root.packageName?.toString().orEmpty()
 
                 // Ignorar apenas o nosso próprio app
-                if (rootPkg == OWN_PACKAGE || rootPkg.startsWith(OWN_PACKAGE)) {
-                    try { root.recycle() } catch (_: Exception) { }
+                if (rootPkg.isOwnPackageName()) {
                     continue
                 }
 
                 extractTextRecursive(root, sb, 0)
-                try { root.recycle() } catch (_: Exception) { }
             }
 
             sb.toString().trim()
@@ -521,7 +535,7 @@ class RideInfoAccessibilityService : AccessibilityService() {
         val packageName = event.packageName?.toString() ?: return
 
         // IGNORAR eventos do nosso próprio app
-        if (packageName == OWN_PACKAGE || packageName.startsWith(OWN_PACKAGE)) return
+        if (packageName.isOwnPackageName()) return
 
         // Não filtrar por pacote — ler a tela inteira e detectar Uber/99 pelo conteúdo
 
@@ -804,14 +818,7 @@ class RideInfoAccessibilityService : AccessibilityService() {
         // → sinal de que há corrida disponível, mas o texto da notif pode não ter dados completos
         // → disparar OCR se a notificação não tem preço+km+min
         val isUberRideSignal = detectAppSource(packageName) == AppSource.UBER &&
-            (text.contains("viagem", ignoreCase = true) ||
-             text.contains("corrida", ignoreCase = true) ||
-             text.contains("pedido", ignoreCase = true) ||
-             text.contains("trip", ignoreCase = true) ||
-             text.contains("request", ignoreCase = true) ||
-             text.contains("ride", ignoreCase = true) ||
-             text.contains("delivery", ignoreCase = true) ||
-             text.contains("entrega", ignoreCase = true))
+            containsAnyIgnoreCase(text, UBER_NOTIFICATION_RIDE_KEYWORDS)
 
         if (isUberRideSignal && !isLikelyRideOffer(text, isStateChange = true)) {
             Log.i(TAG, "=== NOTIFICAÇÃO UBER com sinal de corrida (sem dados) → OCR ===")
@@ -864,15 +871,13 @@ class RideInfoAccessibilityService : AccessibilityService() {
 
         // Ignorar se rootInActiveWindow é do nosso próprio overlay
         val rootPackage = rootNode.packageName?.toString() ?: ""
-        if (rootPackage == OWN_PACKAGE || rootPackage.startsWith(OWN_PACKAGE)) {
-            try { rootNode.recycle() } catch (_: Exception) { }
+        if (rootPackage.isOwnPackageName()) {
             Log.d(TAG, "Ignorado: rootInActiveWindow pertence ao próprio app")
             return
         }
 
         // Extrair texto de TODA a tela (todas as janelas), não só do app do evento
         val allText = extractAllText(rootNode)
-        try { rootNode.recycle() } catch (_: Exception) { }
 
         // Complementar com texto de todas as janelas visíveis
         val screenText = extractAllScreenText()
@@ -1239,7 +1244,6 @@ class RideInfoAccessibilityService : AccessibilityService() {
                         (expectedSource != AppSource.UNKNOWN && rootSource == expectedSource))
 
                 if (!canUseWindow) {
-                    try { root.recycle() } catch (_: Exception) { }
                     continue
                 }
 
@@ -1252,13 +1256,8 @@ class RideInfoAccessibilityService : AccessibilityService() {
                         val parent = try { node.parent } catch (_: Exception) { null }
                         parent?.text?.let { if (it.isNotBlank()) sb.append(it).append(' ') }
                         parent?.contentDescription?.let { if (it.isNotBlank()) sb.append(it).append(' ') }
-
-                        try { parent?.recycle() } catch (_: Exception) { }
-                        try { node.recycle() } catch (_: Exception) { }
                     }
                 }
-
-                try { root.recycle() } catch (_: Exception) { }
             }
 
             sb.toString().trim()
@@ -1275,8 +1274,6 @@ class RideInfoAccessibilityService : AccessibilityService() {
             sb.toString().trim()
         } catch (_: Exception) {
             ""
-        } finally {
-            try { source.recycle() } catch (_: Exception) { }
         }
     }
 
@@ -1300,12 +1297,10 @@ class RideInfoAccessibilityService : AccessibilityService() {
                         (expectedSource != AppSource.UNKNOWN && rootSource == expectedSource))
 
                 if (!shouldUseWindow) {
-                    try { root.recycle() } catch (_: Exception) { }
                     continue
                 }
 
                 extractTextRecursive(root, sb, 0)
-                try { root.recycle() } catch (_: Exception) { }
             }
 
             sb.toString().trim()
@@ -1381,7 +1376,6 @@ class RideInfoAccessibilityService : AccessibilityService() {
                             (expectedSource != AppSource.UNKNOWN && rootSource == expectedSource))
 
                 if (!canUseWindow) {
-                    try { root.recycle() } catch (_: Exception) { }
                     continue
                 }
 
@@ -1398,7 +1392,6 @@ class RideInfoAccessibilityService : AccessibilityService() {
                         node.getBoundsInScreen(nodeBounds)
                         if (query == "R$" && nodeBounds.top < topThreshold && nodeBounds.bottom < topThreshold) {
                             Log.d(TAG, "Node R$ ignorado por estar no topo da tela (top=${nodeBounds.top}, threshold=$topThreshold): ${node.text}")
-                            try { node.recycle() } catch (_: Exception) { }
                             continue
                         }
 
@@ -1409,13 +1402,8 @@ class RideInfoAccessibilityService : AccessibilityService() {
                         val parent = try { node.parent } catch (_: Exception) { null }
                         parent?.text?.let { if (it.isNotBlank()) sb.append(it).append(' ') }
                         parent?.contentDescription?.let { if (it.isNotBlank()) sb.append(it).append(' ') }
-
-                        try { parent?.recycle() } catch (_: Exception) { }
-                        try { node.recycle() } catch (_: Exception) { }
                     }
                 }
-
-                try { root.recycle() } catch (_: Exception) { }
             }
 
             sb.toString().trim()
@@ -1522,7 +1510,6 @@ class RideInfoAccessibilityService : AccessibilityService() {
         for (i in 0 until node.childCount) {
             val child = try { node.getChild(i) } catch (_: Exception) { null } ?: continue
             extractTextRecursive(child, sb, depth + 1)
-            try { child.recycle() } catch (_: Exception) { }
         }
     }
 
@@ -2181,7 +2168,6 @@ class RideInfoAccessibilityService : AccessibilityService() {
             for (i in 0 until node.childCount) {
                 val child = try { node.getChild(i) } catch (_: Exception) { null }
                 collectNodes(child, depth + 1)
-                try { child?.recycle() } catch (_: Exception) { }
             }
         }
 
@@ -2205,8 +2191,6 @@ class RideInfoAccessibilityService : AccessibilityService() {
                 if (canUseWindow) {
                     collectNodes(root, 0)
                 }
-
-                try { root.recycle() } catch (_: Exception) { }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Erro ao extrair nós semânticos: ${e.message}")
@@ -2828,7 +2812,6 @@ class RideInfoAccessibilityService : AccessibilityService() {
                 for (i in 0 until node.childCount) {
                     val child = try { node.getChild(i) } catch (_: Exception) { null }
                     collect(child, depth + 1)
-                    try { child?.recycle() } catch (_: Exception) { }
                     if (lines.size >= maxNodes) break
                 }
             }
@@ -2848,8 +2831,6 @@ class RideInfoAccessibilityService : AccessibilityService() {
                 if (shouldUseWindow) {
                     collect(root, 0)
                 }
-
-                try { root.recycle() } catch (_: Exception) { }
                 if (lines.size >= maxNodes) break
             }
 
@@ -2876,7 +2857,6 @@ class RideInfoAccessibilityService : AccessibilityService() {
                 val windowType = try { window.type } catch (_: Exception) { -1 }
                 val windowLayer = try { window.layer } catch (_: Exception) { -1 }
                 lines.add("win[$idx] pkg=$rootPkg type=$windowType layer=$windowLayer children=$childCount text=$rootText desc=$rootDesc")
-                try { root?.recycle() } catch (_: Exception) { }
             }
             if (lines.isEmpty()) "(nenhuma janela)"
             else lines.joinToString("\n")
@@ -2910,7 +2890,6 @@ class RideInfoAccessibilityService : AccessibilityService() {
                 for (i in 0 until node.childCount) {
                     val child = try { node.getChild(i) } catch (_: Exception) { null }
                     collect(child, depth + 1, windowPkg)
-                    try { child?.recycle() } catch (_: Exception) { }
                     if (lines.size >= maxNodes) break
                 }
             }
@@ -2923,8 +2902,6 @@ class RideInfoAccessibilityService : AccessibilityService() {
                 if (rootPkg != OWN_PACKAGE) {
                     collect(root, 0, rootPkg)
                 }
-
-                try { root.recycle() } catch (_: Exception) { }
                 if (lines.size >= maxNodes) break
             }
 

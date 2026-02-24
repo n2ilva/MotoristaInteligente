@@ -34,9 +34,14 @@ class FirestoreManager(private val context: Context) {
         private const val COLLECTION_RIDE_OFFERS = "ride_offers"
         private const val COLLECTION_SESSIONS = "sessions"
         private const val COLLECTION_REGIONAL_OFFERS = "regional_ride_offers"
+        private const val COLLECTION_REGIONAL_DEMAND_15M = "regional_demand_15m"
         private const val COLLECTION_DRIVER_LOCATIONS = "driver_locations"
+        private const val COLLECTION_ANALYTICS_ONLINE_LOGS = "analytics_online_logs"
+        private const val COLLECTION_ANALYTICS_OFFER_LOGS = "analytics_offer_logs"
+        private const val COLLECTION_ANALYTICS_DRIVER_DAILY = "analytics_driver_daily"
         private const val DOC_PREFERENCES = "preferences"
         private const val DRIVER_LOCATION_EXPIRY_MS = 30 * 60 * 1000L // 30 min — considera motorista "online"
+        private const val DEMAND_BUCKET_10M_MS = 10 * 60 * 1000L
     }
 
     private val db = FirebaseFirestore.getInstance()
@@ -244,65 +249,136 @@ class FirestoreManager(private val context: Context) {
             lastKnownNeighborhoodForOffers = neighborhood
         }
 
-        val resolvedCity = city?.takeIf { it.isNotBlank() } ?: lastKnownCityForOffers
-        val resolvedNeighborhood = neighborhood ?: lastKnownNeighborhoodForOffers
-
         ensureAuthenticated(
             onReady = { userId ->
-                val data = hashMapOf(
-                    "timestamp" to rideData.timestamp,
-                    "appSource" to rideData.appSource.displayName,
-                    "ridePrice" to rideData.ridePrice,
-                    "distanceKm" to rideData.distanceKm,
-                    "estimatedTimeMin" to rideData.estimatedTimeMin,
-                    "pickupDistanceKm" to rideData.pickupDistanceKm,
-                    "pickupTimeMin" to rideData.pickupTimeMin,
-                    "userRating" to rideData.userRating,
-                    "pickupAddress" to rideData.pickupAddress,
-                    "dropoffAddress" to rideData.dropoffAddress,
-                    "extractionSource" to rideData.extractionSource,
-                    "city" to (resolvedCity ?: ""),
-                    "neighborhood" to (resolvedNeighborhood ?: "")
-                )
-
-                // Salvar no escopo do usuário
-                db.collection(COLLECTION_USERS).document(userId)
-                    .collection(COLLECTION_RIDE_OFFERS)
-                    .add(data)
-                    .addOnSuccessListener {
-                        Log.d(
-                            TAG,
-                            "Oferta salva: ${it.id} (R$ ${rideData.ridePrice}, city=${resolvedCity ?: "-"})"
-                        )
-                    }
-                    .addOnFailureListener { Log.e(TAG, "Erro ao salvar oferta", it) }
-
-                // Salvar na coleção global (regional) para análise de demanda por região
-                if (!resolvedCity.isNullOrBlank()) {
-                    val regionalData = hashMapOf(
+                resolveOfferLocation(
+                    userId = userId,
+                    city = city,
+                    neighborhood = neighborhood
+                ) { resolvedCity, resolvedNeighborhood ->
+                    val data = hashMapOf(
                         "timestamp" to rideData.timestamp,
                         "appSource" to rideData.appSource.displayName,
                         "ridePrice" to rideData.ridePrice,
                         "distanceKm" to rideData.distanceKm,
                         "estimatedTimeMin" to rideData.estimatedTimeMin,
                         "pickupDistanceKm" to rideData.pickupDistanceKm,
-                        "city" to resolvedCity,
-                        "neighborhood" to (resolvedNeighborhood ?: ""),
-                        "uid" to userId
+                        "pickupTimeMin" to rideData.pickupTimeMin,
+                        "userRating" to rideData.userRating,
+                        "pickupAddress" to rideData.pickupAddress,
+                        "dropoffAddress" to rideData.dropoffAddress,
+                        "extractionSource" to rideData.extractionSource,
+                        "city" to (resolvedCity ?: ""),
+                        "neighborhood" to (resolvedNeighborhood ?: "")
                     )
 
-                    db.collection(COLLECTION_REGIONAL_OFFERS)
-                        .add(regionalData)
-                        .addOnSuccessListener { Log.d(TAG, "Oferta regional salva: $resolvedCity / $resolvedNeighborhood") }
-                        .addOnFailureListener { Log.e(TAG, "Erro ao salvar oferta regional", it) }
-                } else {
-                    Log.w(TAG, "Oferta salva sem city — regional_ride_offers não atualizado nesta oferta")
+                    // Salvar no escopo do usuário
+                    db.collection(COLLECTION_USERS).document(userId)
+                        .collection(COLLECTION_RIDE_OFFERS)
+                        .add(data)
+                        .addOnSuccessListener {
+                            Log.d(
+                                TAG,
+                                "Oferta salva: ${it.id} (R$ ${rideData.ridePrice}, city=${resolvedCity ?: "-"})"
+                            )
+                        }
+                        .addOnFailureListener { Log.e(TAG, "Erro ao salvar oferta", it) }
+
+                    // Atualizar agregados de demanda regional por janela de 10 minutos
+                    if (!resolvedCity.isNullOrBlank()) {
+                        updateRegionalDemand15m(
+                            city = resolvedCity,
+                            neighborhood = resolvedNeighborhood,
+                            appSource = rideData.appSource.displayName,
+                            driverId = userId
+                        )
+                    } else {
+                        Log.w(TAG, "Oferta salva sem city — demanda regional de 10min não atualizada nesta oferta")
+                    }
+
+                    // Log analítico separado para futuras análises
+                    saveOfferAnalyticsLog(
+                        uid = userId,
+                        rideData = rideData,
+                        city = resolvedCity,
+                        neighborhood = resolvedNeighborhood
+                    )
                 }
             },
             onError = { e ->
                 Log.e(TAG, "Falha de autenticação ao salvar oferta", e)
             }
         )
+    }
+
+    private fun resolveOfferLocation(
+        userId: String,
+        city: String?,
+        neighborhood: String?,
+        onResolved: (String?, String?) -> Unit
+    ) {
+        val initialCity = city?.takeIf { it.isNotBlank() } ?: lastKnownCityForOffers
+        val initialNeighborhood = neighborhood ?: lastKnownNeighborhoodForOffers
+
+        if (!initialCity.isNullOrBlank()) {
+            onResolved(initialCity, initialNeighborhood)
+            return
+        }
+
+        db.collection(COLLECTION_DRIVER_LOCATIONS)
+            .document(userId)
+            .get()
+            .addOnSuccessListener { doc ->
+                val fallbackCity = doc.getString("city")?.trim().orEmpty().ifBlank { null }
+                val fallbackNeighborhood = doc.getString("neighborhood")?.trim().orEmpty().ifBlank { null }
+
+                if (!fallbackCity.isNullOrBlank()) {
+                    lastKnownCityForOffers = fallbackCity
+                    lastKnownNeighborhoodForOffers = fallbackNeighborhood
+                    Log.d(TAG, "Fallback de localização aplicado para oferta: $fallbackCity / ${fallbackNeighborhood ?: "-"}")
+                }
+
+                onResolved(fallbackCity ?: initialCity, fallbackNeighborhood ?: initialNeighborhood)
+            }
+            .addOnFailureListener { e ->
+                Log.w(TAG, "Falha ao buscar fallback em driver_locations para oferta", e)
+                onResolved(initialCity, initialNeighborhood)
+            }
+    }
+
+    private fun saveOfferAnalyticsLog(
+        uid: String,
+        rideData: RideData,
+        city: String?,
+        neighborhood: String?
+    ) {
+        val timestamp = rideData.timestamp.takeIf { it > 0 } ?: System.currentTimeMillis()
+        val appName = rideData.appSource.displayName
+        val isUber = isUberSource(appName)
+        val isNinetyNine = isNinetyNineSource(appName)
+
+        val data = hashMapOf(
+            "uid" to uid,
+            "timestamp" to timestamp,
+            "dateKey" to dayKeyFromTimestamp(timestamp),
+            "city" to (city ?: ""),
+            "neighborhood" to (neighborhood ?: ""),
+            "appSource" to appName,
+            "offersUber" to if (isUber) 1 else 0,
+            "offers99" to if (isNinetyNine) 1 else 0,
+            "offerCount" to 1,
+            "ridePrice" to rideData.ridePrice,
+            "distanceKm" to rideData.distanceKm,
+            "estimatedTimeMin" to rideData.estimatedTimeMin,
+            "pickupDistanceKm" to rideData.pickupDistanceKm,
+            "createdAt" to System.currentTimeMillis()
+        )
+
+        db.collection(COLLECTION_ANALYTICS_OFFER_LOGS)
+            .add(data)
+            .addOnFailureListener { e ->
+                Log.e(TAG, "Erro ao salvar analytics_offer_logs", e)
+            }
     }
 
     // ========================
@@ -480,6 +556,10 @@ class FirestoreManager(private val context: Context) {
         val avgPrice99: Double = 0.0,
         val avgPricePerKmUber: Double = 0.0,
         val avgPricePerKm99: Double = 0.0,
+        val avgDistanceKmUber: Double = 0.0,
+        val avgDistanceKm99: Double = 0.0,
+        val avgEstimatedTimeMinUber: Double = 0.0,
+        val avgEstimatedTimeMin99: Double = 0.0,
         val offersLast1h: Int = 0,
         val offersLast3h: Int = 0,
         val bestPricePerKm: Double = 0.0,
@@ -495,14 +575,7 @@ class FirestoreManager(private val context: Context) {
     fun loadTodayRideOfferStats(onResult: (RideOfferStats) -> Unit) {
         ensureAuthenticated(
             onReady = { uid ->
-                // Início do dia atual (meia-noite)
-                val calendar = Calendar.getInstance().apply {
-                    set(Calendar.HOUR_OF_DAY, 0)
-                    set(Calendar.MINUTE, 0)
-                    set(Calendar.SECOND, 0)
-                    set(Calendar.MILLISECOND, 0)
-                }
-                val todayStart = calendar.timeInMillis
+                val todayStart = todayStartMillis()
 
                 db.collection(COLLECTION_USERS).document(uid)
                     .collection(COLLECTION_RIDE_OFFERS)
@@ -519,15 +592,25 @@ class FirestoreManager(private val context: Context) {
                 val oneHourAgo = now - 60 * 60 * 1000L
                 val threeHoursAgo = now - 3 * 60 * 60 * 1000L
 
-                val allPrices = mutableListOf<Double>()
-                val allPricePerKm = mutableListOf<Double>()
-                val allDistances = mutableListOf<Double>()
-                val allTimes = mutableListOf<Double>()
+                data class MetricAccumulator(
+                    var offers: Int = 0,
+                    var sumPrice: Double = 0.0,
+                    var countPrice: Int = 0,
+                    var sumDistance: Double = 0.0,
+                    var countDistance: Int = 0,
+                    var sumTime: Double = 0.0,
+                    var countTime: Int = 0,
+                    var sumPricePerKm: Double = 0.0,
+                    var countPricePerKm: Int = 0
+                )
 
-                val uberPrices = mutableListOf<Double>()
-                val uberPricePerKm = mutableListOf<Double>()
-                val ninetyNinePrices = mutableListOf<Double>()
-                val ninetyNinePricePerKm = mutableListOf<Double>()
+                fun average(sum: Double, count: Int): Double = if (count > 0) sum / count else 0.0
+
+                val all = MetricAccumulator()
+                val uber = MetricAccumulator()
+                val ninetyNine = MetricAccumulator()
+
+                val allPricePerKmValues = mutableListOf<Double>()
 
                 var offersUber = 0
                 var offers99 = 0
@@ -545,24 +628,68 @@ class FirestoreManager(private val context: Context) {
 
                     if (timestamp > lastTimestamp) lastTimestamp = timestamp
 
-                    allPrices.add(price)
-                    if (pricePerKm > 0) allPricePerKm.add(pricePerKm)
-                    if (distance > 0) allDistances.add(distance)
-                    if (time > 0) allTimes.add(time)
+                    all.offers++
+                    if (price > 0) {
+                        all.sumPrice += price
+                        all.countPrice++
+                    }
+                    if (distance > 0) {
+                        all.sumDistance += distance
+                        all.countDistance++
+                    }
+                    if (time > 0) {
+                        all.sumTime += time
+                        all.countTime++
+                    }
+                    if (pricePerKm > 0) {
+                        all.sumPricePerKm += pricePerKm
+                        all.countPricePerKm++
+                        allPricePerKmValues.add(pricePerKm)
+                    }
 
                     if (timestamp >= oneHourAgo) offersLast1h++
                     if (timestamp >= threeHoursAgo) offersLast3h++
 
                     when {
-                        app.contains("Uber", ignoreCase = true) -> {
+                        isUberSource(app) -> {
                             offersUber++
-                            uberPrices.add(price)
-                            if (pricePerKm > 0) uberPricePerKm.add(pricePerKm)
+                            uber.offers++
+                            if (price > 0) {
+                                uber.sumPrice += price
+                                uber.countPrice++
+                            }
+                            if (distance > 0) {
+                                uber.sumDistance += distance
+                                uber.countDistance++
+                            }
+                            if (time > 0) {
+                                uber.sumTime += time
+                                uber.countTime++
+                            }
+                            if (pricePerKm > 0) {
+                                uber.sumPricePerKm += pricePerKm
+                                uber.countPricePerKm++
+                            }
                         }
-                        app.contains("99", ignoreCase = true) -> {
+                        isNinetyNineSource(app) -> {
                             offers99++
-                            ninetyNinePrices.add(price)
-                            if (pricePerKm > 0) ninetyNinePricePerKm.add(pricePerKm)
+                            ninetyNine.offers++
+                            if (price > 0) {
+                                ninetyNine.sumPrice += price
+                                ninetyNine.countPrice++
+                            }
+                            if (distance > 0) {
+                                ninetyNine.sumDistance += distance
+                                ninetyNine.countDistance++
+                            }
+                            if (time > 0) {
+                                ninetyNine.sumTime += time
+                                ninetyNine.countTime++
+                            }
+                            if (pricePerKm > 0) {
+                                ninetyNine.sumPricePerKm += pricePerKm
+                                ninetyNine.countPricePerKm++
+                            }
                         }
                     }
                 }
@@ -571,18 +698,22 @@ class FirestoreManager(private val context: Context) {
                     totalOffersToday = snapshot.size(),
                     offersUber = offersUber,
                     offers99 = offers99,
-                    avgPrice = allPrices.averageOrZero(),
-                    avgPricePerKm = allPricePerKm.averageOrZero(),
-                    avgDistanceKm = allDistances.averageOrZero(),
-                    avgEstimatedTimeMin = allTimes.averageOrZero(),
-                    avgPriceUber = uberPrices.averageOrZero(),
-                    avgPrice99 = ninetyNinePrices.averageOrZero(),
-                    avgPricePerKmUber = uberPricePerKm.averageOrZero(),
-                    avgPricePerKm99 = ninetyNinePricePerKm.averageOrZero(),
+                    avgPrice = average(all.sumPrice, all.countPrice),
+                    avgPricePerKm = average(all.sumPricePerKm, all.countPricePerKm),
+                    avgDistanceKm = average(all.sumDistance, all.countDistance),
+                    avgEstimatedTimeMin = average(all.sumTime, all.countTime),
+                    avgPriceUber = average(uber.sumPrice, uber.countPrice),
+                    avgPrice99 = average(ninetyNine.sumPrice, ninetyNine.countPrice),
+                    avgPricePerKmUber = average(uber.sumPricePerKm, uber.countPricePerKm),
+                    avgPricePerKm99 = average(ninetyNine.sumPricePerKm, ninetyNine.countPricePerKm),
+                    avgDistanceKmUber = average(uber.sumDistance, uber.countDistance),
+                    avgDistanceKm99 = average(ninetyNine.sumDistance, ninetyNine.countDistance),
+                    avgEstimatedTimeMinUber = average(uber.sumTime, uber.countTime),
+                    avgEstimatedTimeMin99 = average(ninetyNine.sumTime, ninetyNine.countTime),
                     offersLast1h = offersLast1h,
                     offersLast3h = offersLast3h,
-                    bestPricePerKm = allPricePerKm.maxOrNull() ?: 0.0,
-                    worstPricePerKm = allPricePerKm.minOrNull() ?: 0.0,
+                    bestPricePerKm = allPricePerKmValues.maxOrNull() ?: 0.0,
+                    worstPricePerKm = allPricePerKmValues.minOrNull() ?: 0.0,
                     lastOfferTimestamp = lastTimestamp,
                     loaded = true
                 )
@@ -608,13 +739,7 @@ class FirestoreManager(private val context: Context) {
     fun loadTodayOffersIntoDemandTracker(onComplete: () -> Unit = {}) {
         ensureAuthenticated(
             onReady = { uid ->
-                val calendar = Calendar.getInstance().apply {
-                    set(Calendar.HOUR_OF_DAY, 0)
-                    set(Calendar.MINUTE, 0)
-                    set(Calendar.SECOND, 0)
-                    set(Calendar.MILLISECOND, 0)
-                }
-                val todayStart = calendar.timeInMillis
+                val todayStart = todayStartMillis()
 
                 db.collection(COLLECTION_USERS).document(uid)
                     .collection(COLLECTION_RIDE_OFFERS)
@@ -636,11 +761,7 @@ class FirestoreManager(private val context: Context) {
                                 ?: doc.getLong("estimatedTimeMin")?.toInt() ?: 0
                             val app = doc.getString("appSource") ?: ""
                             val pricePerKm = if (distance > 0) price / distance else 0.0
-                            val appSource = when {
-                                app.contains("Uber", ignoreCase = true) -> AppSource.UBER
-                                app.contains("99", ignoreCase = true) -> AppSource.NINETY_NINE
-                                else -> AppSource.UNKNOWN
-                            }
+                            val appSource = resolveAppSource(app)
 
                             DemandTracker.RideSnapshot(
                                 timestamp = timestamp,
@@ -669,6 +790,38 @@ class FirestoreManager(private val context: Context) {
 
     private fun List<Double>.averageOrZero(): Double =
         if (isEmpty()) 0.0 else average()
+
+    private fun dayKeyFromTimestamp(timestamp: Long = System.currentTimeMillis()): String {
+        val calendar = Calendar.getInstance().apply {
+            timeInMillis = timestamp
+        }
+        val year = calendar.get(Calendar.YEAR)
+        val month = calendar.get(Calendar.MONTH) + 1
+        val day = calendar.get(Calendar.DAY_OF_MONTH)
+        return String.format("%04d-%02d-%02d", year, month, day)
+    }
+
+    private fun todayStartMillis(): Long {
+        val calendar = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        return calendar.timeInMillis
+    }
+
+    private fun isUberSource(appName: String): Boolean =
+        appName.contains("uber", ignoreCase = true)
+
+    private fun isNinetyNineSource(appName: String): Boolean =
+        appName.contains("99", ignoreCase = true)
+
+    private fun resolveAppSource(appName: String): AppSource = when {
+        isUberSource(appName) -> AppSource.UBER
+        isNinetyNineSource(appName) -> AppSource.NINETY_NINE
+        else -> AppSource.UNKNOWN
+    }
 
     // ========================
     // Demanda Regional (dados globais de todos os motoristas)
@@ -711,6 +864,309 @@ class FirestoreManager(private val context: Context) {
         val avgPrice99: Double = 0.0,
         val loaded: Boolean = false
     )
+
+    data class NeighborhoodDemandMini(
+        val neighborhood: String,
+        val offersLast15m: Int,
+        val offersUberLast15m: Int,
+        val offers99Last15m: Int,
+        val activeDriversLast15m: Int
+    )
+
+    data class CityDemandMini(
+        val city: String,
+        val offersLast15m: Int,
+        val offersUberLast15m: Int,
+        val offers99Last15m: Int,
+        val activeDriversLast15m: Int,
+        val neighborhoods: List<NeighborhoodDemandMini>
+    )
+
+    /**
+     * Carrega resumo de demanda por cidade/bairro com base em:
+     * - ofertas agregadas no bucket atual
+     * - motoristas online em tempo real (driver_locations)
+     */
+    fun loadCityDemandMini(
+        cities: List<String>,
+        onResult: (List<CityDemandMini>) -> Unit
+    ) {
+        val currentBucketStart = currentDemandBucketStart()
+        val expiryThreshold = System.currentTimeMillis() - DRIVER_LOCATION_EXPIRY_MS
+
+        db.collection(COLLECTION_REGIONAL_DEMAND_15M)
+            .whereEqualTo("bucketStart", currentBucketStart)
+            .get()
+            .addOnSuccessListener { demandSnapshot ->
+                data class Totals(
+                    var total: Int = 0,
+                    var uber: Int = 0,
+                    var ninetyNine: Int = 0,
+                    var activeDrivers: Int = 0
+                )
+
+                val cityTotals = mutableMapOf<String, Totals>()
+                val neighborhoodTotalsByCity = mutableMapOf<String, MutableMap<String, Totals>>()
+
+                for (doc in demandSnapshot.documents) {
+                    val city = doc.getString("city")?.trim().orEmpty()
+                    if (city.isBlank()) continue
+
+                    val total = doc.getLong("offersTotal")?.toInt() ?: 0
+                    val uber = doc.getLong("offersUber")?.toInt() ?: 0
+                    val ninetyNine = doc.getLong("offers99")?.toInt() ?: 0
+                    val activeDrivers = doc.getLong("activeDrivers")?.toInt() ?: 0
+
+                    val neighborhood = doc.getString("neighborhood")?.trim().orEmpty()
+                    if (neighborhood.isBlank()) {
+                        cityTotals[city] = Totals(
+                            total = total,
+                            uber = uber,
+                            ninetyNine = ninetyNine,
+                            activeDrivers = activeDrivers
+                        )
+                    } else {
+                        val cityNeighborhoods = neighborhoodTotalsByCity.getOrPut(city) { mutableMapOf() }
+                        cityNeighborhoods[neighborhood] = Totals(
+                            total = total,
+                            uber = uber,
+                            ninetyNine = ninetyNine,
+                            activeDrivers = activeDrivers
+                        )
+                    }
+                }
+
+                for ((city, neighborhoodsMap) in neighborhoodTotalsByCity) {
+                    if (cityTotals[city] == null) {
+                        val aggregated = neighborhoodsMap.values.fold(Totals()) { acc, next ->
+                            acc.total += next.total
+                            acc.uber += next.uber
+                            acc.ninetyNine += next.ninetyNine
+                            acc.activeDrivers += next.activeDrivers
+                            acc
+                        }
+                        cityTotals[city] = aggregated
+                    }
+                }
+
+                db.collection(COLLECTION_DRIVER_LOCATIONS)
+                    .whereGreaterThanOrEqualTo("updatedAt", expiryThreshold)
+                    .get()
+                    .addOnSuccessListener { onlineSnapshot ->
+                        val onlineCityDrivers = mutableMapOf<String, Int>()
+                        val onlineNeighborhoodDriversByCity = mutableMapOf<String, MutableMap<String, Int>>()
+
+                        for (doc in onlineSnapshot.documents) {
+                            val city = doc.getString("city")?.trim().orEmpty()
+                            if (city.isBlank()) continue
+
+                            onlineCityDrivers[city] = (onlineCityDrivers[city] ?: 0) + 1
+
+                            val neighborhood = doc.getString("neighborhood")?.trim().orEmpty()
+                            if (neighborhood.isNotBlank()) {
+                                val neighborhoodsMap = onlineNeighborhoodDriversByCity.getOrPut(city) { mutableMapOf() }
+                                neighborhoodsMap[neighborhood] = (neighborhoodsMap[neighborhood] ?: 0) + 1
+                            }
+                        }
+
+                        val allCities = (
+                            cities +
+                                cityTotals.keys +
+                                neighborhoodTotalsByCity.keys +
+                                onlineCityDrivers.keys +
+                                onlineNeighborhoodDriversByCity.keys
+                            )
+                            .filter { it.isNotBlank() }
+                            .distinct()
+
+                        val result = allCities
+                            .map { city ->
+                                val cityTotalsValue = cityTotals[city] ?: Totals()
+                                val cityOnlineDrivers = onlineCityDrivers[city] ?: 0
+
+                                val demandNeighborhoods = neighborhoodTotalsByCity[city] ?: emptyMap()
+                                val onlineNeighborhoods = onlineNeighborhoodDriversByCity[city] ?: emptyMap()
+
+                                val allNeighborhoodNames = (demandNeighborhoods.keys + onlineNeighborhoods.keys)
+                                    .filter { it.isNotBlank() }
+                                    .distinct()
+
+                                val neighborhoods = allNeighborhoodNames
+                                    .map { neighborhoodName ->
+                                        val demandTotals = demandNeighborhoods[neighborhoodName] ?: Totals()
+                                        NeighborhoodDemandMini(
+                                            neighborhood = neighborhoodName,
+                                            offersLast15m = demandTotals.total,
+                                            offersUberLast15m = demandTotals.uber,
+                                            offers99Last15m = demandTotals.ninetyNine,
+                                            activeDriversLast15m = onlineNeighborhoods[neighborhoodName] ?: 0
+                                        )
+                                    }
+                                    .sortedWith(
+                                        compareByDescending<NeighborhoodDemandMini> { it.offersLast15m }
+                                            .thenByDescending { it.activeDriversLast15m }
+                                            .thenBy { it.neighborhood }
+                                    )
+
+                                CityDemandMini(
+                                    city = city,
+                                    offersLast15m = cityTotalsValue.total,
+                                    offersUberLast15m = cityTotalsValue.uber,
+                                    offers99Last15m = cityTotalsValue.ninetyNine,
+                                    activeDriversLast15m = cityOnlineDrivers,
+                                    neighborhoods = neighborhoods
+                                )
+                            }
+                            .sortedWith(
+                                compareByDescending<CityDemandMini> { it.offersLast15m }
+                                    .thenByDescending { it.activeDriversLast15m }
+                                    .thenBy { it.city }
+                            )
+
+                        onResult(result)
+                    }
+                    .addOnFailureListener { e ->
+                        Log.e(TAG, "Erro ao carregar motoristas online por cidade", e)
+
+                        val allCities = (cities + cityTotals.keys + neighborhoodTotalsByCity.keys)
+                            .filter { it.isNotBlank() }
+                            .distinct()
+
+                        val result = allCities
+                            .map { city ->
+                                val cityTotalsValue = cityTotals[city] ?: Totals()
+                                val neighborhoods = neighborhoodTotalsByCity[city]
+                                    ?.entries
+                                    ?.sortedWith(compareByDescending<Map.Entry<String, Totals>> { it.value.total }.thenBy { it.key })
+                                    ?.map {
+                                        NeighborhoodDemandMini(
+                                            neighborhood = it.key,
+                                            offersLast15m = it.value.total,
+                                            offersUberLast15m = it.value.uber,
+                                            offers99Last15m = it.value.ninetyNine,
+                                            activeDriversLast15m = it.value.activeDrivers
+                                        )
+                                    } ?: emptyList()
+
+                                CityDemandMini(
+                                    city = city,
+                                    offersLast15m = cityTotalsValue.total,
+                                    offersUberLast15m = cityTotalsValue.uber,
+                                    offers99Last15m = cityTotalsValue.ninetyNine,
+                                    activeDriversLast15m = cityTotalsValue.activeDrivers,
+                                    neighborhoods = neighborhoods
+                                )
+                            }
+                            .sortedWith(compareByDescending<CityDemandMini> { it.offersLast15m }.thenBy { it.city })
+
+                        onResult(result)
+                    }
+            }
+            .addOnFailureListener { e ->
+                Log.e(TAG, "Erro ao carregar mini cards de demanda por cidade", e)
+                onResult(
+                    cities
+                        .filter { it.isNotBlank() }
+                        .distinct()
+                        .sorted()
+                        .map {
+                            CityDemandMini(
+                                city = it,
+                                offersLast15m = 0,
+                                offersUberLast15m = 0,
+                                offers99Last15m = 0,
+                                activeDriversLast15m = 0,
+                                neighborhoods = emptyList()
+                            )
+                        }
+                )
+            }
+    }
+
+    private fun currentDemandBucketStart(now: Long = System.currentTimeMillis()): Long {
+        return now - (now % DEMAND_BUCKET_10M_MS)
+    }
+
+    private fun demandDocId(city: String, neighborhood: String?): String {
+        val cityPart = sanitizeDocIdPart(city)
+        val neighborhoodPart = sanitizeDocIdPart(neighborhood ?: "")
+        return if (neighborhoodPart.isBlank()) "city_${cityPart}" else "city_${cityPart}__bairro_${neighborhoodPart}"
+    }
+
+    private fun sanitizeDocIdPart(raw: String): String {
+        return raw
+            .trim()
+            .lowercase()
+            .replace(Regex("[^a-z0-9]+"), "_")
+            .trim('_')
+    }
+
+    private fun updateRegionalDemand15m(
+        city: String,
+        neighborhood: String?,
+        appSource: String,
+        driverId: String
+    ) {
+        val bucketStart = currentDemandBucketStart()
+        val cityRef = db.collection(COLLECTION_REGIONAL_DEMAND_15M)
+            .document(demandDocId(city, null))
+        val neighborhoodRef = neighborhood
+            ?.takeIf { it.isNotBlank() }
+            ?.let { bairro ->
+                db.collection(COLLECTION_REGIONAL_DEMAND_15M)
+                    .document(demandDocId(city, bairro))
+            }
+
+        val isUber = isUberSource(appSource)
+        val isNinetyNine = isNinetyNineSource(appSource)
+        val now = System.currentTimeMillis()
+
+        db.runTransaction { transaction ->
+            fun upsertCounter(docRef: com.google.firebase.firestore.DocumentReference, neighborhoodValue: String?) {
+                val snapshot = transaction.get(docRef)
+                val existingBucket = snapshot.getLong("bucketStart") ?: -1L
+
+                val baseTotal = if (existingBucket == bucketStart) (snapshot.getLong("offersTotal") ?: 0L) else 0L
+                val baseUber = if (existingBucket == bucketStart) (snapshot.getLong("offersUber") ?: 0L) else 0L
+                val base99 = if (existingBucket == bucketStart) (snapshot.getLong("offers99") ?: 0L) else 0L
+                val baseDriverIds = if (existingBucket == bucketStart) {
+                    (snapshot.get("activeDriverIds") as? List<*>) ?: emptyList<Any>()
+                } else {
+                    emptyList<Any>()
+                }
+
+                val updatedDriverIds = baseDriverIds
+                    .mapNotNull { it?.toString() }
+                    .toMutableSet()
+                    .apply {
+                        if (driverId.isNotBlank()) add(driverId)
+                    }
+
+                val activeDrivers = updatedDriverIds.size.toLong()
+
+                val updated = hashMapOf<String, Any>(
+                    "city" to city,
+                    "neighborhood" to (neighborhoodValue ?: ""),
+                    "bucketStart" to bucketStart,
+                    "updatedAt" to now,
+                    "offersTotal" to (baseTotal + 1L),
+                    "offersUber" to (baseUber + if (isUber) 1L else 0L),
+                    "offers99" to (base99 + if (isNinetyNine) 1L else 0L),
+                    "activeDrivers" to activeDrivers,
+                    "activeDriverIds" to updatedDriverIds.toList()
+                )
+
+                transaction.set(docRef, updated, SetOptions.merge())
+            }
+
+            upsertCounter(cityRef, null)
+            neighborhoodRef?.let { ref -> upsertCounter(ref, neighborhood) }
+            null
+        }
+            .addOnFailureListener { e ->
+                Log.e(TAG, "Erro ao atualizar agregados regionais de 10min", e)
+            }
+    }
 
     /**
      * Carrega as últimas ofertas individuais de uma região (últimas 24h).
@@ -786,13 +1242,54 @@ class FirestoreManager(private val context: Context) {
                 db.collection(COLLECTION_DRIVER_LOCATIONS)
                     .document(uid) // 1 registro por motorista, atualizado in-place
                     .set(data)
-                    .addOnSuccessListener { Log.d(TAG, "Localização salva: $city / $neighborhood") }
+                    .addOnSuccessListener {
+                        Log.d(TAG, "Localização salva: $city / $neighborhood")
+
+                        loadOnlineDriversForCity(city) { cityOnlineCount ->
+                            loadOnlineDriversForCity(city, neighborhood) { neighborhoodOnlineCount ->
+                                saveOnlineAnalyticsLog(
+                                    uid = uid,
+                                    city = city,
+                                    neighborhood = neighborhood,
+                                    cityOnlineCount = cityOnlineCount,
+                                    neighborhoodOnlineCount = neighborhoodOnlineCount
+                                )
+                            }
+                        }
+                    }
                     .addOnFailureListener { Log.e(TAG, "Erro ao salvar localização", it) }
             },
             onError = { e ->
                 Log.e(TAG, "Falha de autenticação ao salvar localização", e)
             }
         )
+    }
+
+    private fun saveOnlineAnalyticsLog(
+        uid: String,
+        city: String,
+        neighborhood: String?,
+        cityOnlineCount: Int,
+        neighborhoodOnlineCount: Int
+    ) {
+        val timestamp = System.currentTimeMillis()
+        val data = hashMapOf(
+            "uid" to uid,
+            "timestamp" to timestamp,
+            "dateKey" to dayKeyFromTimestamp(timestamp),
+            "city" to city,
+            "neighborhood" to (neighborhood ?: ""),
+            "onlineStatus" to "online",
+            "onlineDriversCity" to cityOnlineCount,
+            "onlineDriversNeighborhood" to neighborhoodOnlineCount,
+            "createdAt" to timestamp
+        )
+
+        db.collection(COLLECTION_ANALYTICS_ONLINE_LOGS)
+            .add(data)
+            .addOnFailureListener { e ->
+                Log.e(TAG, "Erro ao salvar analytics_online_logs", e)
+            }
     }
 
     /**
@@ -1011,11 +1508,11 @@ class FirestoreManager(private val context: Context) {
                     if (timestamp >= threeHoursAgo) offersLast3h++
 
                     when {
-                        app.contains("Uber", ignoreCase = true) -> {
+                        isUberSource(app) -> {
                             offersUber++
                             if (price > 0) uberPrices.add(price)
                         }
-                        app.contains("99", ignoreCase = true) -> {
+                        isNinetyNineSource(app) -> {
                             offers99++
                             if (price > 0) ninetyNinePrices.add(price)
                         }
@@ -1053,5 +1550,98 @@ class FirestoreManager(private val context: Context) {
                 offersLoaded = true
                 mergeAndDeliver()
             }
+    }
+
+    /**
+     * Salva análise diária do motorista em coleção separada para BI/analytics futuro.
+     * Usa DemandTracker + stats de ofertas do Firebase como base.
+     */
+    fun saveDriverDailyDemandAnalytics(
+        demandStats: DemandTracker.DemandStats,
+        city: String?,
+        neighborhood: String?,
+        onlineStartMs: Long,
+        onlineEndMs: Long = System.currentTimeMillis()
+    ) {
+        ensureAuthenticated(
+            onReady = { uid ->
+                val safeStart = onlineStartMs.takeIf { it > 0 } ?: onlineEndMs
+                val durationMs = (onlineEndMs - safeStart).coerceAtLeast(0L)
+                val durationMin = durationMs / (60 * 1000)
+                val dateKey = dayKeyFromTimestamp(onlineEndMs)
+                val docId = "${uid}_$dateKey"
+                val regionLabel = listOfNotNull(city?.takeIf { it.isNotBlank() }, neighborhood?.takeIf { it.isNotBlank() })
+                    .joinToString(" / ")
+
+                loadTodayRideOfferStats { firebaseStats ->
+                    db.runTransaction { transaction ->
+                        val ref = db.collection(COLLECTION_ANALYTICS_DRIVER_DAILY).document(docId)
+                        val snapshot = transaction.get(ref)
+
+                        val previousTotalOnlineMin = snapshot.getLong("totalOnlineDurationMin") ?: 0L
+                        val previousSessionCount = snapshot.getLong("sessionCount") ?: 0L
+                        val previousRegions = (snapshot.get("regionsVisited") as? List<*>)
+                            ?.mapNotNull { it?.toString() }
+                            ?.toMutableSet()
+                            ?: mutableSetOf()
+
+                        if (regionLabel.isNotBlank()) previousRegions.add(regionLabel)
+
+                        val data = hashMapOf<String, Any>(
+                            "uid" to uid,
+                            "dateKey" to dateKey,
+                            "updatedAt" to System.currentTimeMillis(),
+                            "sessionCount" to (previousSessionCount + 1L),
+                            "totalOnlineDurationMin" to (previousTotalOnlineMin + durationMin),
+                            "lastOnlineStartMs" to safeStart,
+                            "lastOnlineEndMs" to onlineEndMs,
+                            "lastOnlineDurationMin" to durationMin,
+                            "lastCity" to (city ?: ""),
+                            "lastNeighborhood" to (neighborhood ?: ""),
+                            "regionsVisited" to previousRegions.toList(),
+
+                            "demandTrend" to demandStats.trend.name,
+                            "priceTrend" to demandStats.priceTrend.name,
+                            "demandLevel" to demandStats.demandLevel.name,
+                            "ridesLast15Min" to demandStats.ridesLast15Min,
+                            "ridesLast30Min" to demandStats.ridesLast30Min,
+                            "ridesLastHour" to demandStats.ridesLastHour,
+                            "ridesPreviousHour" to demandStats.ridesPreviousHour,
+                            "ridesPerHour" to demandStats.ridesPerHour,
+                            "sessionDurationMin" to demandStats.sessionDurationMin,
+                            "sessionTotalEarnings" to demandStats.sessionTotalEarnings,
+                            "sessionAvgEarningsPerHour" to demandStats.sessionAvgEarningsPerHour,
+                            "acceptedRidesTotal" to demandStats.acceptedRidesTotal,
+                            "acceptedRidesUber" to demandStats.acceptedRidesUber,
+                            "acceptedRides99" to demandStats.acceptedRides99,
+                            "acceptedBelowAverage" to demandStats.acceptedBelowAverage,
+
+                            "firebaseTotalOffersToday" to firebaseStats.totalOffersToday,
+                            "firebaseOffersLast1h" to firebaseStats.offersLast1h,
+                            "firebaseOffersLast3h" to firebaseStats.offersLast3h,
+                            "firebaseOffersUber" to firebaseStats.offersUber,
+                            "firebaseOffers99" to firebaseStats.offers99,
+                            "firebaseAvgPriceUber" to firebaseStats.avgPriceUber,
+                            "firebaseAvgPrice99" to firebaseStats.avgPrice99,
+                            "firebaseAvgPricePerKmUber" to firebaseStats.avgPricePerKmUber,
+                            "firebaseAvgPricePerKm99" to firebaseStats.avgPricePerKm99,
+                            "firebaseLastOfferTimestamp" to firebaseStats.lastOfferTimestamp
+                        )
+
+                        transaction.set(ref, data, SetOptions.merge())
+                        null
+                    }
+                        .addOnSuccessListener {
+                            Log.d(TAG, "Análise diária salva em analytics_driver_daily para $uid/$dateKey")
+                        }
+                        .addOnFailureListener { e ->
+                            Log.e(TAG, "Erro ao salvar analytics_driver_daily", e)
+                        }
+                }
+            },
+            onError = { e ->
+                Log.e(TAG, "Falha de autenticação ao salvar analytics diário", e)
+            }
+        )
     }
 }

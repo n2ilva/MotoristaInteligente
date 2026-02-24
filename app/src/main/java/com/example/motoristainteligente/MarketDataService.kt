@@ -42,6 +42,11 @@ class MarketDataService(private val context: Context) {
     private var lastFetchTime = 0L
     private var listeners = mutableListOf<(MarketInfo) -> Unit>()
 
+    private data class CurrentDateTime(
+        val hour: Int,
+        val dayOfWeek: Int
+    )
+
     /**
      * Dados consolidados de mercado para a região/horário atual.
      */
@@ -144,8 +149,9 @@ class MarketDataService(private val context: Context) {
     // ==================================================
 
     private fun fetchFromSources(location: Location?): MarketInfo {
-        val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
-        val dayOfWeek = Calendar.getInstance().get(Calendar.DAY_OF_WEEK)
+        val now = getCurrentDateTime()
+        val hour = now.hour
+        val dayOfWeek = now.dayOfWeek
 
         // 1. Tentar buscar preço de combustível
         var fuelPrice = 5.89 // Valor padrão gasolina
@@ -167,11 +173,7 @@ class MarketDataService(private val context: Context) {
         val surgeMultiplier = demandData.second
 
         // 5. Horários de pico do dia
-        val peakHours = if (dayOfWeek == Calendar.SATURDAY || dayOfWeek == Calendar.SUNDAY) {
-            listOf(10, 11, 12, 18, 19, 20, 22, 23)
-        } else {
-            listOf(7, 8, 12, 17, 18, 19)
-        }
+        val peakHours = getPeakHoursForDay(dayOfWeek)
 
         // 6. Região
         val regionName = getRegionName(location)
@@ -234,39 +236,10 @@ class MarketDataService(private val context: Context) {
         location: Location?
     ): Pair<Double, Double> {
         // Base por hora (tabela de demanda)
-        var demand = when (hour) {
-            in 0..1 -> 0.40
-            in 2..4 -> 0.10
-            5 -> 0.15
-            6 -> 0.35
-            7 -> 0.75
-            8 -> 0.85
-            9 -> 0.55
-            10 -> 0.40
-            11 -> 0.50
-            12 -> 0.65
-            13 -> 0.55
-            14 -> 0.35
-            15 -> 0.30
-            16 -> 0.45
-            17 -> 0.80
-            18 -> 0.95
-            19 -> 0.90
-            20 -> 0.70
-            21 -> 0.55
-            22 -> 0.60
-            23 -> 0.55
-            else -> 0.40
-        }
+        var demand = getDemandBaseForHour(hour)
 
         // Ajuste por dia da semana
-        val weekendFactor = when (dayOfWeek) {
-            Calendar.FRIDAY -> 1.15   // Sexta
-            Calendar.SATURDAY -> 1.10
-            Calendar.SUNDAY -> 0.85
-            Calendar.MONDAY -> 0.95
-            else -> 1.0
-        }
+        val weekendFactor = getDayFactor(dayOfWeek)
         demand = (demand * weekendFactor).coerceIn(0.0, 1.0)
 
         // Surge multiplier estimado pela demanda
@@ -295,6 +268,63 @@ class MarketDataService(private val context: Context) {
             21 -> 1.50
             in 22..23 -> 1.70  // Noite
             else -> 1.50
+        }
+    }
+
+    private fun getCurrentDateTime(): CurrentDateTime {
+        val calendar = Calendar.getInstance()
+        return CurrentDateTime(
+            hour = calendar.get(Calendar.HOUR_OF_DAY),
+            dayOfWeek = calendar.get(Calendar.DAY_OF_WEEK)
+        )
+    }
+
+    private fun isWeekend(dayOfWeek: Int): Boolean {
+        return dayOfWeek == Calendar.SATURDAY || dayOfWeek == Calendar.SUNDAY
+    }
+
+    private fun getPeakHoursForDay(dayOfWeek: Int): List<Int> {
+        return if (isWeekend(dayOfWeek)) {
+            listOf(10, 11, 12, 18, 19, 20, 22, 23)
+        } else {
+            listOf(7, 8, 12, 17, 18, 19)
+        }
+    }
+
+    private fun getDemandBaseForHour(hour: Int): Double {
+        return when (hour) {
+            in 0..1 -> 0.40
+            in 2..4 -> 0.10
+            5 -> 0.15
+            6 -> 0.35
+            7 -> 0.75
+            8 -> 0.85
+            9 -> 0.55
+            10 -> 0.40
+            11 -> 0.50
+            12 -> 0.65
+            13 -> 0.55
+            14 -> 0.35
+            15 -> 0.30
+            16 -> 0.45
+            17 -> 0.80
+            18 -> 0.95
+            19 -> 0.90
+            20 -> 0.70
+            21 -> 0.55
+            22 -> 0.60
+            23 -> 0.55
+            else -> 0.40
+        }
+    }
+
+    private fun getDayFactor(dayOfWeek: Int): Double {
+        return when (dayOfWeek) {
+            Calendar.FRIDAY -> 1.15   // Sexta
+            Calendar.SATURDAY -> 1.10
+            Calendar.SUNDAY -> 0.85
+            Calendar.MONDAY -> 0.95
+            else -> 1.0
         }
     }
 

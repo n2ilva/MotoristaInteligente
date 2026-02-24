@@ -2,6 +2,7 @@ package com.example.motoristainteligente
 
 import android.location.Location
 import java.util.Calendar
+import java.text.Normalizer
 
 /**
  * Consultor inteligente de pausas para o motorista.
@@ -17,6 +18,49 @@ import java.util.Calendar
  * - Localização (zona quente vs zona fria)
  */
 object PauseAdvisor {
+
+    data class CityPeakGuidance(
+        val inPeakNow: Boolean,
+        val nextPeakText: String,
+        val tipText: String,
+        val shouldPauseNow: Boolean
+    )
+
+    data class CityPeakSignal(
+        val supportedCity: Boolean,
+        val cityName: String,
+        val inPeakNow: Boolean,
+        val activePeakLabel: String?,
+        val minutesToPeakEnd: Int?,
+        val nextPeakLabel: String?,
+        val minutesToNextPeak: Int?
+    )
+
+    private data class PeakWindow(
+        val startMin: Int,
+        val endMin: Int,
+        val label: String
+    ) {
+        fun contains(minuteOfDay: Int): Boolean = minuteOfDay in startMin..endMin
+    }
+
+    private data class CityPeakProfile(
+        val normalizedCityName: String,
+        val weekdayWindows: List<PeakWindow>,
+        val weekendWindows: List<PeakWindow>,
+        val peakTips: List<String>,
+        val offPeakTip: String,
+        val weekendTip: String
+    )
+
+    private data class CityPeakContext(
+        val profile: CityPeakProfile,
+        val isWeekend: Boolean,
+        val minuteOfDay: Int,
+        val windows: List<PeakWindow>,
+        val activeWindow: PeakWindow?,
+        val nextWindow: PeakWindow?
+    )
 
     /**
      * Resultado da recomendação de pausa.
@@ -244,6 +288,215 @@ object PauseAdvisor {
             currentHour in 2..4 -> "Próximo pico: Matutino (7h-9h)"
             else -> "Próximo pico em breve"
         }
+    }
+
+    fun getCityPeakGuidance(
+        cityName: String?,
+        hour: Int,
+        minute: Int,
+        dayOfWeek: Int
+    ): CityPeakGuidance {
+        val context = buildCityPeakContext(cityName, hour, minute, dayOfWeek)
+        if (context == null) {
+            return CityPeakGuidance(
+                inPeakNow = false,
+                nextPeakText = getNextPeakInfo(hour),
+                tipText = "Use janelas de pico para rodar e faça pausa curta entre-picos.",
+                shouldPauseNow = false
+            )
+        }
+
+        val inPeakNow = context.activeWindow != null
+        val nextPeakText = if (inPeakNow) {
+            "Pico atual: ${context.activeWindow!!.label}"
+        } else if (context.nextWindow != null) {
+            "Próximo pico: ${context.nextWindow.label}"
+        } else {
+            val first = context.windows.firstOrNull()
+            if (first != null) "Próximo pico amanhã: ${first.label}" else "Próximo pico: —"
+        }
+
+        val shouldPauseNow = !inPeakNow
+        val tipText = when {
+            context.isWeekend -> context.profile.weekendTip
+            inPeakNow -> context.profile.peakTips.firstOrNull() ?: "Horário forte: priorize corridas com melhor retorno."
+            else -> context.profile.offPeakTip
+        }
+
+        return CityPeakGuidance(
+            inPeakNow = inPeakNow,
+            nextPeakText = nextPeakText,
+            tipText = tipText,
+            shouldPauseNow = shouldPauseNow
+        )
+    }
+
+    fun getCityPeakSignal(
+        cityName: String?,
+        hour: Int,
+        minute: Int,
+        dayOfWeek: Int
+    ): CityPeakSignal {
+        val context = buildCityPeakContext(cityName, hour, minute, dayOfWeek)
+        if (context == null) {
+            return CityPeakSignal(
+                supportedCity = false,
+                cityName = cityName ?: "",
+                inPeakNow = false,
+                activePeakLabel = null,
+                minutesToPeakEnd = null,
+                nextPeakLabel = null,
+                minutesToNextPeak = null
+            )
+        }
+
+        val minutesToEnd = context.activeWindow?.let {
+            (it.endMin - context.minuteOfDay).coerceAtLeast(0)
+        }
+        val minutesToNext = if (context.activeWindow != null) {
+            null
+        } else {
+            context.nextWindow?.let { (it.startMin - context.minuteOfDay).coerceAtLeast(0) }
+        }
+
+        return CityPeakSignal(
+            supportedCity = true,
+            cityName = context.profile.normalizedCityName,
+            inPeakNow = context.activeWindow != null,
+            activePeakLabel = context.activeWindow?.label,
+            minutesToPeakEnd = minutesToEnd,
+            nextPeakLabel = context.nextWindow?.label,
+            minutesToNextPeak = minutesToNext
+        )
+    }
+
+    private fun buildCityPeakContext(
+        cityName: String?,
+        hour: Int,
+        minute: Int,
+        dayOfWeek: Int
+    ): CityPeakContext? {
+        val profile = resolveCityProfile(cityName) ?: return null
+        val minuteOfDay = hour * 60 + minute
+        val isWeekend = dayOfWeek == Calendar.SATURDAY || dayOfWeek == Calendar.SUNDAY
+        val windows = if (isWeekend) profile.weekendWindows else profile.weekdayWindows
+        val activeWindow = windows.firstOrNull { it.contains(minuteOfDay) }
+        val nextWindow = windows.firstOrNull { it.startMin > minuteOfDay }
+
+        return CityPeakContext(
+            profile = profile,
+            isWeekend = isWeekend,
+            minuteOfDay = minuteOfDay,
+            windows = windows,
+            activeWindow = activeWindow,
+            nextWindow = nextWindow
+        )
+    }
+
+    private fun resolveCityProfile(cityName: String?): CityPeakProfile? {
+        val normalized = normalizeCityName(cityName)
+        if (normalized.isBlank()) return null
+        return getGoiasPeakProfiles().firstOrNull { profile ->
+            normalized.contains(profile.normalizedCityName)
+        }
+    }
+
+    private fun normalizeCityName(raw: String?): String {
+        if (raw.isNullOrBlank()) return ""
+        val noAccents = Normalizer.normalize(raw, Normalizer.Form.NFD)
+            .replace(Regex("\\p{InCombiningDiacriticalMarks}+"), "")
+        return noAccents.lowercase()
+    }
+
+    private fun h(hour: Int, minute: Int): Int = hour * 60 + minute
+
+    private fun getGoiasPeakProfiles(): List<CityPeakProfile> {
+        return listOf(
+            CityPeakProfile(
+                normalizedCityName = "goiania",
+                weekdayWindows = listOf(
+                    PeakWindow(h(5, 0), h(9, 0), "Manhã (5h-9h)"),
+                    PeakWindow(h(11, 0), h(14, 0), "Almoço (11h-14h)"),
+                    PeakWindow(h(16, 0), h(20, 0), "Final da tarde/noite (16h-20h)"),
+                    PeakWindow(h(22, 0), h(23, 59), "Noturno (após 22h)")
+                ),
+                weekendWindows = listOf(
+                    PeakWindow(h(0, 0), h(3, 0), "Madrugada (00h-3h)"),
+                    PeakWindow(h(5, 0), h(10, 0), "Sábado manhã (até 10h)"),
+                    PeakWindow(h(9, 0), h(12, 0), "Domingo manhã"),
+                    PeakWindow(h(16, 0), h(20, 0), "Domingo fim da tarde"),
+                    PeakWindow(h(22, 0), h(23, 59), "Noite (22h-00h)")
+                ),
+                peakTips = listOf(
+                    "Manhã (5h-9h): pico de deslocamento para trabalho e escolas.",
+                    "Almoço (11h-14h): alta demanda no Centro, Oeste, Marista e Bueno.",
+                    "Final da tarde/noite (16h-20h): maior volume de chamadas e tarifa dinâmica.",
+                    "Após 22h: foco em bares e saída de faculdades."
+                ),
+                offPeakTip = "Fora dos picos, reposicione e faça pausa estratégica para voltar no próximo horário forte.",
+                weekendTip = "Fim de semana: madrugada de festas/restaurantes, sábado manhã e domingo manhã/fim da tarde tendem a aquecer."
+            ),
+            CityPeakProfile(
+                normalizedCityName = "senador canedo",
+                weekdayWindows = listOf(
+                    PeakWindow(h(5, 0), h(9, 30), "Manhã (5h-9h30)"),
+                    PeakWindow(h(11, 45), h(14, 0), "Almoço (11h45-14h)"),
+                    PeakWindow(h(17, 0), h(20, 0), "Final da tarde/noite (17h-20h)")
+                ),
+                weekendWindows = listOf(
+                    PeakWindow(h(5, 0), h(9, 30), "Manhã (5h-9h30)"),
+                    PeakWindow(h(11, 45), h(14, 0), "Almoço (11h45-14h)"),
+                    PeakWindow(h(17, 0), h(20, 0), "Final da tarde/noite (17h-20h)")
+                ),
+                peakTips = listOf(
+                    "Manhã (5h-9h30): pico de saída para trabalho em Goiânia e indústrias locais.",
+                    "Almoço (11h45-14h): movimentação interna e para regiões centrais.",
+                    "Final da tarde/noite (17h-20h): alto fluxo de retorno para casa."
+                ),
+                offPeakTip = "Entre os picos, priorize pausa curta e reposicionamento em eixos de saída/retorno.",
+                weekendTip = "Siga os mesmos horários de alta e monitore deslocamentos para Goiânia e centros locais."
+            ),
+            CityPeakProfile(
+                normalizedCityName = "aparecida de goiania",
+                weekdayWindows = listOf(
+                    PeakWindow(h(5, 0), h(9, 30), "Manhã (5h-9h30)"),
+                    PeakWindow(h(11, 45), h(14, 0), "Almoço (11h45-14h)"),
+                    PeakWindow(h(17, 0), h(20, 0), "Final da tarde/noite (17h-20h)")
+                ),
+                weekendWindows = listOf(
+                    PeakWindow(h(0, 0), h(2, 0), "Madrugada (00h-2h)"),
+                    PeakWindow(h(16, 0), h(20, 0), "Fim da tarde/noite (16h-20h)"),
+                    PeakWindow(h(21, 0), h(23, 59), "Noite (21h-00h)")
+                ),
+                peakTips = listOf(
+                    "Manhã (5h-9h30): forte saída de bairros residenciais para Aparecida/Goiânia.",
+                    "Almoço (11h45-14h): boa movimentação para restaurantes, clínicas e centros empresariais.",
+                    "Final da tarde/noite (17h-20h): alto fluxo de retorno e maior incidência de dinâmica."
+                ),
+                offPeakTip = "Fora dos picos, mantenha-se em corredores de retorno e faça pausa estratégica curta.",
+                weekendTip = "Sexta/sábado à noite até 2h e domingo 16h-20h costumam ter demanda alta por lazer e retorno de viagens."
+            ),
+            CityPeakProfile(
+                normalizedCityName = "trindade",
+                weekdayWindows = listOf(
+                    PeakWindow(h(5, 0), h(9, 0), "Manhã (5h-9h)"),
+                    PeakWindow(h(11, 45), h(14, 0), "Almoço (11h45-14h)"),
+                    PeakWindow(h(16, 30), h(20, 0), "Tarde/Noite (16h30-20h)")
+                ),
+                weekendWindows = listOf(
+                    PeakWindow(h(0, 0), h(2, 0), "Madrugada (00h-2h)"),
+                    PeakWindow(h(16, 0), h(20, 0), "Domingo fim da tarde (16h-20h)"),
+                    PeakWindow(h(21, 0), h(23, 59), "Noite (21h-00h)")
+                ),
+                peakTips = listOf(
+                    "Manhã (5h-9h): fluxo intenso de deslocamento para Trindade e Goiânia.",
+                    "Almoço (11h45-14h): alta demanda no centro para alimentação, clínicas e empresas.",
+                    "Tarde/noite (16h30-20h): maior pico com retorno do trabalho e saída de escolas."
+                ),
+                offPeakTip = "Fora do pico, priorize pausa estratégica e retorne nos horários de maior fluxo.",
+                weekendTip = "Sexta/sábado à noite (21h-2h) e domingo 16h-20h tendem a elevar demanda com lazer, eventos e romeiros."
+            )
+        )
     }
 
     /**

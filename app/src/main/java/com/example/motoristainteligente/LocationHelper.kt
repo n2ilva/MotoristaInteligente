@@ -15,6 +15,11 @@ import androidx.core.content.ContextCompat
  */
 class LocationHelper(private val context: Context) {
 
+    companion object {
+        private const val UPDATE_INTERVAL_MS = 5000L
+        private const val UPDATE_MIN_DISTANCE_M = 10f
+    }
+
     private val locationManager =
         context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
 
@@ -28,10 +33,7 @@ class LocationHelper(private val context: Context) {
         if (!hasLocationPermission()) return null
 
         try {
-            lastKnownLocation =
-                locationManager.getLastKnownLocation(LocationManager.FUSED_PROVIDER)
-                    ?: locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)
-                    ?: locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+            lastKnownLocation = getLastKnownLocationFromProviders()
         } catch (_: SecurityException) {
             // Permissão revogada em runtime
         }
@@ -49,23 +51,13 @@ class LocationHelper(private val context: Context) {
             lastKnownLocation = location
         }
 
+        val listener = locationListener ?: return
+
         try {
-            locationManager.requestLocationUpdates(
-                LocationManager.GPS_PROVIDER,
-                5000L,  // a cada 5 segundos
-                10f,    // ou 10 metros
-                locationListener!!,
-                Looper.getMainLooper()
-            )
+            requestLocationUpdatesForProvider(LocationManager.GPS_PROVIDER, listener)
         } catch (_: Exception) {
             try {
-                locationManager.requestLocationUpdates(
-                    LocationManager.NETWORK_PROVIDER,
-                    5000L,
-                    10f,
-                    locationListener!!,
-                    Looper.getMainLooper()
-                )
+                requestLocationUpdatesForProvider(LocationManager.NETWORK_PROVIDER, listener)
             } catch (_: Exception) {
                 // Localização indisponível
             }
@@ -116,5 +108,30 @@ class LocationHelper(private val context: Context) {
                 ContextCompat.checkSelfPermission(
                     context, Manifest.permission.ACCESS_COARSE_LOCATION
                 ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun getLastKnownLocationFromProviders(): Location? {
+        val providers = listOf(
+            LocationManager.FUSED_PROVIDER,
+            LocationManager.GPS_PROVIDER,
+            LocationManager.NETWORK_PROVIDER
+        )
+
+        for (provider in providers) {
+            val location = locationManager.getLastKnownLocation(provider)
+            if (location != null) return location
+        }
+
+        return null
+    }
+
+    private fun requestLocationUpdatesForProvider(provider: String, listener: LocationListener) {
+        locationManager.requestLocationUpdates(
+            provider,
+            UPDATE_INTERVAL_MS,
+            UPDATE_MIN_DISTANCE_M,
+            listener,
+            Looper.getMainLooper()
+        )
     }
 }
