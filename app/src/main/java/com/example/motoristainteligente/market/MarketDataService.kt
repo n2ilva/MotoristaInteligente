@@ -331,7 +331,7 @@ class MarketDataService(private val context: Context) {
     private fun getRegionName(location: Location?): String {
         if (location == null) return "Região não identificada"
         return try {
-            val geocoder = Geocoder(context, Locale("pt", "BR"))
+            val geocoder = Geocoder(context, Locale.forLanguageTag("pt-BR"))
             @Suppress("DEPRECATION")
             val addresses = geocoder.getFromLocation(location.latitude, location.longitude, 1)
             if (!addresses.isNullOrEmpty()) {

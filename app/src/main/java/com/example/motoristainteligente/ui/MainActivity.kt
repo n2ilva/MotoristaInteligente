@@ -283,7 +283,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun isAccessibilityServiceEnabled(): Boolean {
-        val service = "$packageName/${RideInfoAccessibilityService::class.java.canonicalName}"
+        val service = "$packageName/${RideInfoOcrService::class.java.canonicalName}"
         val enabledServices = Settings.Secure.getString(
             contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
         ) ?: return false
@@ -309,9 +309,19 @@ fun AppWithDrawer(
     var currentScreen by remember { mutableStateOf(Screen.HOME) }
     val context = LocalContext.current
     val firestoreManager = remember { FirestoreManager(context) }
+    val driverPreferences = remember { DriverPreferences(context) }
 
     // Forçar recomposição quando estado de auth muda
     var authRefresh by remember { mutableStateOf(0) }
+
+    LaunchedEffect(authRefresh) {
+        driverPreferences.firestoreManager = firestoreManager
+        if (firestoreManager.isGoogleUser) {
+            firestoreManager.loadPreferences(driverPreferences)
+        } else {
+            driverPreferences.applyToAnalyzer()
+        }
+    }
 
     // Back button: fechar drawer > voltar para HOME > sair do app
     val activity = LocalContext.current as? Activity
@@ -375,7 +385,9 @@ fun AppWithDrawer(
                         onNavigateToPermissions = { currentScreen = Screen.PERMISSIONS },
                         firestoreManager = firestoreManager
                     )
-                    Screen.RIDE_SETTINGS -> RideSettingsScreen()
+                    Screen.RIDE_SETTINGS -> RideSettingsScreen(
+                        firestoreManager = firestoreManager
+                    )
                     Screen.DEMAND_BY_REGION -> DemandByRegionScreen(
                         firestoreManager = firestoreManager
                     )
@@ -743,7 +755,7 @@ fun HomeScreen(
                     Spacer(modifier = Modifier.height(8.dp))
 
                     // Status dos serviços
-                    val isAccessibilityActive = RideInfoAccessibilityService.isServiceConnected
+                    val isAccessibilityActive = RideInfoOcrService.isServiceConnected
                     val isLocationActive = ContextCompat.checkSelfPermission(
                         context, Manifest.permission.ACCESS_FINE_LOCATION
                     ) == PackageManager.PERMISSION_GRANTED
@@ -756,35 +768,8 @@ fun HomeScreen(
                         StatusIndicatorRow("Acessibilidade", isAccessibilityActive)
                         StatusIndicatorRow("Localização", isLocationActive)
                         StatusIndicatorRow("Sobreposição de Tela", isOverlayActive)
-
-                        // Contador de ofertas coletadas (sessão + Firebase do dia)
-                        val rideCount = DemandTracker.getRideCount()
-                        if (rideCount > 0) {
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.Center,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "📡 $rideCount ofertas detectadas hoje",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = Color(0xFF1E88E5)
-                                )
-                            }
-                        }
                     }
 
-                    if (!isAccessibilityActive) {
-                        Text(
-                            text = "Ative o serviço de acessibilidade nas configurações do Android para detectar corridas automaticamente.",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.padding(top = 4.dp)
-                        )
-                    }
                 }
             }
         }
@@ -917,7 +902,9 @@ fun HomeScreen(
 // RIDE SETTINGS SCREEN (Configurar Corrida)
 // ===============================================
 @Composable
-fun RideSettingsScreen() {
+fun RideSettingsScreen(
+    firestoreManager: FirestoreManager? = null
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -932,14 +919,18 @@ fun RideSettingsScreen() {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        DriverSettingsCard()
+        DriverSettingsCard(
+            firestoreManager = firestoreManager
+        )
 
         Spacer(modifier = Modifier.height(24.dp))
 
         // ========================
         // Dados do Veículo
         // ========================
-        VehicleSettingsCard()
+        VehicleSettingsCard(
+            firestoreManager = firestoreManager
+        )
 
         Spacer(modifier = Modifier.height(24.dp))
 
@@ -1712,6 +1703,7 @@ fun LoginScreen(
                 }
 
                 firestoreManager.signOut()
+                DriverPreferences(context).applyToAnalyzer()
                 isGoogleLoggedIn = false
             }
         })
@@ -1815,8 +1807,13 @@ fun LoginScreen(
                         firestoreManager.signInWithGoogle(
                             idToken = idToken,
                             onSuccess = {
-                                isLoading = false
-                                onLoginSuccess()
+                                val prefs = DriverPreferences(context).apply {
+                                    this.firestoreManager = firestoreManager
+                                }
+                                firestoreManager.loadPreferences(prefs) {
+                                    isLoading = false
+                                    onLoginSuccess()
+                                }
                             },
                             onError = { e ->
                                 isLoading = false
@@ -2007,139 +2004,16 @@ fun LoggedInScreen(
 // Componentes compartilhados
 // ===============================================
 
-@Composable
-fun DriverSettingsCard() {
-    val context = LocalContext.current
-    val prefs = remember { DriverPreferences(context) }
-
-    var minPricePerKm by remember { mutableFloatStateOf(prefs.minPricePerKm.toFloat()) }
-    var minEarningsPerHour by remember { mutableFloatStateOf(prefs.minEarningsPerHour.toFloat()) }
-    var maxPickupDistance by remember { mutableFloatStateOf(prefs.maxPickupDistance.toFloat()) }
-    var maxRideDistance by remember { mutableFloatStateOf(prefs.maxRideDistance.toFloat()) }
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = Color(0xFFFF6F00).copy(alpha = 0.08f)
-        )
-    ) {
-        Column(modifier = Modifier.padding(20.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Suas Preferências",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-                OutlinedButton(
-                    onClick = {
-                        prefs.resetToDefaults()
-                        minPricePerKm = DriverPreferences.DEFAULT_MIN_PRICE_PER_KM.toFloat()
-                        minEarningsPerHour = DriverPreferences.DEFAULT_MIN_EARNINGS_PER_HOUR.toFloat()
-                        maxPickupDistance = DriverPreferences.DEFAULT_MAX_PICKUP_DISTANCE.toFloat()
-                        maxRideDistance = DriverPreferences.DEFAULT_MAX_RIDE_DISTANCE.toFloat()
-                    },
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Text("Resetar", fontSize = 12.sp)
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            SettingSlider(
-                label = "Valor mínimo por km",
-                value = minPricePerKm,
-                valueText = String.format("R$ %.2f/km", minPricePerKm),
-                min = DriverPreferences.MIN_PRICE_PER_KM_FLOOR.toFloat(),
-                max = DriverPreferences.MIN_PRICE_PER_KM_CEIL.toFloat(),
-                steps = 44,
-                onValueChange = { minPricePerKm = it },
-                onValueChangeFinished = {
-                    prefs.minPricePerKm = minPricePerKm.toDouble()
-                    prefs.applyToAnalyzer()
-                }
-            )
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            SettingSlider(
-                label = "Ganho mínimo por hora",
-                value = minEarningsPerHour,
-                valueText = String.format("R$ %.0f/h", minEarningsPerHour),
-                min = DriverPreferences.MIN_EARNINGS_FLOOR.toFloat(),
-                max = DriverPreferences.MIN_EARNINGS_CEIL.toFloat(),
-                steps = 18,
-                onValueChange = { minEarningsPerHour = it },
-                onValueChangeFinished = {
-                    prefs.minEarningsPerHour = minEarningsPerHour.toDouble()
-                    prefs.applyToAnalyzer()
-                }
-            )
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            SettingSlider(
-                label = "Distância máx. para buscar cliente",
-                value = maxPickupDistance,
-                valueText = String.format("%.1f km", maxPickupDistance),
-                min = DriverPreferences.MAX_PICKUP_FLOOR.toFloat(),
-                max = DriverPreferences.MAX_PICKUP_CEIL.toFloat(),
-                steps = 38,
-                onValueChange = { maxPickupDistance = it },
-                onValueChangeFinished = {
-                    prefs.maxPickupDistance = maxPickupDistance.toDouble()
-                    prefs.applyToAnalyzer()
-                }
-            )
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            SettingSlider(
-                label = "Distância máx. da corrida",
-                value = maxRideDistance,
-                valueText = String.format("%.0f km", maxRideDistance),
-                min = DriverPreferences.MAX_RIDE_DISTANCE_FLOOR.toFloat(),
-                max = DriverPreferences.MAX_RIDE_DISTANCE_CEIL.toFloat(),
-                steps = 19,
-                onValueChange = { maxRideDistance = it },
-                onValueChangeFinished = {
-                    prefs.maxRideDistance = maxRideDistance.toDouble()
-                    prefs.applyToAnalyzer()
-                }
-            )
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(
-                        Color(0xFF424242).copy(alpha = 0.15f),
-                        RoundedCornerShape(8.dp)
-                    )
-                    .padding(10.dp)
-            ) {
-                Text(
-                    text = "📌 ${prefs.getSummary()}",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                )
-            }
-        }
-    }
-}
-
 // ===============================================
 // VEHICLE SETTINGS CARD (Dados do Veículo)
 // ===============================================
 @Composable
-fun VehicleSettingsCard() {
+fun VehicleSettingsCard(
+    firestoreManager: FirestoreManager? = null
+) {
     val context = LocalContext.current
     val prefs = remember { DriverPreferences(context) }
+    prefs.firestoreManager = firestoreManager
 
     var vehicleType by remember { mutableStateOf(prefs.vehicleType) }
     var fuelType by remember { mutableStateOf(prefs.fuelType) }
@@ -3329,7 +3203,7 @@ fun EmptyStateCard(emoji: String, title: String, subtitle: String) {
 }
 
 private fun isAccessibilityEnabled(context: Context): Boolean {
-    val service = "${context.packageName}/${RideInfoAccessibilityService::class.java.canonicalName}"
+    val service = "${context.packageName}/${RideInfoOcrService::class.java.canonicalName}"
     val enabledServices = Settings.Secure.getString(
         context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
     ) ?: return false

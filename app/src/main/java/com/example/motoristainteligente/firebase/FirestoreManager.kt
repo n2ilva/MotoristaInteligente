@@ -42,6 +42,13 @@ class FirestoreManager(private val context: Context) {
         private const val DOC_PREFERENCES = "preferences"
         private const val DRIVER_LOCATION_EXPIRY_MS = 30 * 60 * 1000L // 30 min — considera motorista "online"
         private const val DEMAND_BUCKET_10M_MS = 10 * 60 * 1000L
+
+        // Critério mínimo para persistir oferta no Firebase:
+        // - conter valor explícito em moeda (R$)
+        // - conter ao menos dois km no formato entre parênteses: (X km)
+        private val FIREBASE_REQUIRED_PRICE_PATTERN = Regex("""R\$\s*\d""")
+        private val FIREBASE_REQUIRED_KM_IN_PAREN_PATTERN =
+            Regex("""\(\s*\d{1,3}(?:[,.]\d+)?\s*km\s*\)""", RegexOption.IGNORE_CASE)
     }
 
     private val db = FirebaseFirestore.getInstance()
@@ -194,6 +201,12 @@ class FirestoreManager(private val context: Context) {
             "minEarningsPerHour" to prefs.minEarningsPerHour,
             "maxPickupDistance" to prefs.maxPickupDistance,
             "maxRideDistance" to prefs.maxRideDistance,
+            "vehicleType" to prefs.vehicleType,
+            "fuelType" to prefs.fuelType,
+            "kmPerLiterGasoline" to prefs.kmPerLiterGasoline,
+            "kmPerLiterEthanol" to prefs.kmPerLiterEthanol,
+            "gasolinePrice" to prefs.gasolinePrice,
+            "ethanolPrice" to prefs.ethanolPrice,
             "updatedAt" to System.currentTimeMillis()
         )
 
@@ -216,10 +229,18 @@ class FirestoreManager(private val context: Context) {
             .get()
             .addOnSuccessListener { doc ->
                 if (doc.exists()) {
-                    doc.getDouble("minPricePerKm")?.let { prefs.minPricePerKm = it }
-                    doc.getDouble("minEarningsPerHour")?.let { prefs.minEarningsPerHour = it }
-                    doc.getDouble("maxPickupDistance")?.let { prefs.maxPickupDistance = it }
-                    doc.getDouble("maxRideDistance")?.let { prefs.maxRideDistance = it }
+                    prefs.runWithoutCloudSync {
+                        doc.getDouble("minPricePerKm")?.let { prefs.minPricePerKm = it }
+                        doc.getDouble("minEarningsPerHour")?.let { prefs.minEarningsPerHour = it }
+                        doc.getDouble("maxPickupDistance")?.let { prefs.maxPickupDistance = it }
+                        doc.getDouble("maxRideDistance")?.let { prefs.maxRideDistance = it }
+                        doc.getString("vehicleType")?.takeIf { it.isNotBlank() }?.let { prefs.vehicleType = it }
+                        doc.getString("fuelType")?.takeIf { it.isNotBlank() }?.let { prefs.fuelType = it }
+                        doc.getDouble("kmPerLiterGasoline")?.let { prefs.kmPerLiterGasoline = it }
+                        doc.getDouble("kmPerLiterEthanol")?.let { prefs.kmPerLiterEthanol = it }
+                        doc.getDouble("gasolinePrice")?.let { prefs.gasolinePrice = it }
+                        doc.getDouble("ethanolPrice")?.let { prefs.ethanolPrice = it }
+                    }
                     prefs.applyToAnalyzer()
                     Log.d(TAG, "Preferências carregadas do Firestore")
                 }
@@ -244,10 +265,21 @@ class FirestoreManager(private val context: Context) {
      *   regional_ride_offers/{auto-id}           → dados globais para análise regional
      */
     fun saveRideOffer(rideData: RideData, city: String? = null, neighborhood: String? = null) {
+        if (!isValidOfferForFirebase(rideData)) {
+            Log.d(
+                TAG,
+                "Oferta ignorada no Firebase por não atender critérios mínimos (R$ + 2x km em parênteses)."
+            )
+            return
+        }
+
         if (!city.isNullOrBlank()) {
             lastKnownCityForOffers = city
             lastKnownNeighborhoodForOffers = neighborhood
         }
+
+        val normalizedOfferSource = resolveOfferSourceByTextRule(rideData)
+        val normalizedAppName = normalizedOfferSource.displayName
 
         ensureAuthenticated(
             onReady = { userId ->
@@ -258,7 +290,7 @@ class FirestoreManager(private val context: Context) {
                 ) { resolvedCity, resolvedNeighborhood ->
                     val data = hashMapOf(
                         "timestamp" to rideData.timestamp,
-                        "appSource" to rideData.appSource.displayName,
+                        "appSource" to normalizedAppName,
                         "ridePrice" to rideData.ridePrice,
                         "distanceKm" to rideData.distanceKm,
                         "estimatedTimeMin" to rideData.estimatedTimeMin,
@@ -289,7 +321,7 @@ class FirestoreManager(private val context: Context) {
                         updateRegionalDemand15m(
                             city = resolvedCity,
                             neighborhood = resolvedNeighborhood,
-                            appSource = rideData.appSource.displayName,
+                            appSource = normalizedAppName,
                             driverId = userId
                         )
                     } else {
@@ -300,6 +332,7 @@ class FirestoreManager(private val context: Context) {
                     saveOfferAnalyticsLog(
                         uid = userId,
                         rideData = rideData,
+                        appSource = normalizedAppName,
                         city = resolvedCity,
                         neighborhood = resolvedNeighborhood
                     )
@@ -309,6 +342,19 @@ class FirestoreManager(private val context: Context) {
                 Log.e(TAG, "Falha de autenticação ao salvar oferta", e)
             }
         )
+    }
+
+    private fun isValidOfferForFirebase(rideData: RideData): Boolean {
+        if (rideData.ridePrice <= 0.0) return false
+
+        val rawText = rideData.rawText
+        if (rawText.isBlank()) return false
+
+        val hasPriceToken = FIREBASE_REQUIRED_PRICE_PATTERN.containsMatchIn(rawText)
+        if (!hasPriceToken) return false
+
+        val kmPairsCount = FIREBASE_REQUIRED_KM_IN_PAREN_PATTERN.findAll(rawText).count()
+        return kmPairsCount >= 2
     }
 
     private fun resolveOfferLocation(
@@ -349,11 +395,12 @@ class FirestoreManager(private val context: Context) {
     private fun saveOfferAnalyticsLog(
         uid: String,
         rideData: RideData,
+        appSource: String,
         city: String?,
         neighborhood: String?
     ) {
         val timestamp = rideData.timestamp.takeIf { it > 0 } ?: System.currentTimeMillis()
-        val appName = rideData.appSource.displayName
+        val appName = appSource
         val isUber = isUberSource(appName)
         val isNinetyNine = isNinetyNineSource(appName)
 
@@ -379,6 +426,14 @@ class FirestoreManager(private val context: Context) {
             .addOnFailureListener { e ->
                 Log.e(TAG, "Erro ao salvar analytics_offer_logs", e)
             }
+    }
+
+    private fun resolveOfferSourceByTextRule(rideData: RideData): AppSource {
+        val raw = rideData.rawText
+        if (raw.contains("UberX", ignoreCase = true)) {
+            return AppSource.UBER
+        }
+        return AppSource.NINETY_NINE
     }
 
     // ========================

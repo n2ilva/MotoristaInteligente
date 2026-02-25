@@ -81,7 +81,7 @@
             android:padding="2dp" />
     </RelativeLayout>
 
-    <!-- Grid compacto: Valor/KM | Valor/Min | Distância Total -->
+    <!-- Grid compacto: Valor/KM | Valor/Hora | Valor Corrida -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -121,7 +121,7 @@
             android:layout_gravity="center_vertical"
             android:background="#22FFFFFF" />
 
-        <!-- Col 2: Valor/Min -->
+        <!-- Col 2: Valor/Hora -->
         <LinearLayout
             android:layout_width="0dp"
             android:layout_height="wrap_content"
@@ -132,7 +132,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="R$/Min"
+            android:text="R$/H"
                 android:textColor="#888888"
                 android:textSize="9sp" />
 
@@ -140,7 +140,7 @@
                 android:id="@+id/tvValuePerMin"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="R$ 1,85"
+                android:text="R$ 28,50"
                 android:textColor="#FFFFFF"
                 android:textSize="14sp"
                 android:textStyle="bold" />
@@ -152,7 +152,7 @@
             android:layout_gravity="center_vertical"
             android:background="#22FFFFFF" />
 
-        <!-- Col 3: Km Total (buscar + destino) -->
+        <!-- Col 3: Valor da Corrida -->
         <LinearLayout
             android:layout_width="0dp"
             android:layout_height="wrap_content"
@@ -163,7 +163,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Km Total"
+            android:text="Valor Corrida"
                 android:textColor="#888888"
                 android:textSize="9sp" />
 
@@ -171,7 +171,7 @@
                 android:id="@+id/tvTotalDistance"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="9,8 km"
+                android:text="R$ 23,40"
                 android:textColor="#FFFFFF"
                 android:textSize="14sp"
                 android:textStyle="bold" />

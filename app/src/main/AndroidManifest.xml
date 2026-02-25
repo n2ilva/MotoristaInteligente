@@ -48,7 +48,7 @@
             android:foregroundServiceType="location" />
 
         <service
-            android:name=".RideInfoAccessibilityService"
+            android:name=".RideInfoOcrService"
             android:exported="false"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>

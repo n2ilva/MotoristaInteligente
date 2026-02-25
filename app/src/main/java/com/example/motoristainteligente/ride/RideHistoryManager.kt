@@ -209,7 +209,7 @@ class RideHistoryManager(context: Context) {
     fun getDailyEarningsLast7Days(): List<Pair<String, Double>> {
         val cal = Calendar.getInstance()
         val result = mutableListOf<Pair<String, Double>>()
-        val dayNameFormat = SimpleDateFormat("EEE", Locale("pt", "BR"))
+        val dayNameFormat = SimpleDateFormat("EEE", Locale.forLanguageTag("pt-BR"))
         for (i in 6 downTo 0) {
             cal.timeInMillis = System.currentTimeMillis()
             cal.add(Calendar.DAY_OF_YEAR, -i)
@@ -227,7 +227,7 @@ class RideHistoryManager(context: Context) {
     fun getDailyRidesLast7Days(): List<Pair<String, Int>> {
         val cal = Calendar.getInstance()
         val result = mutableListOf<Pair<String, Int>>()
-        val dayNameFormat = SimpleDateFormat("EEE", Locale("pt", "BR"))
+        val dayNameFormat = SimpleDateFormat("EEE", Locale.forLanguageTag("pt-BR"))
         for (i in 6 downTo 0) {
             cal.timeInMillis = System.currentTimeMillis()
             cal.add(Calendar.DAY_OF_YEAR, -i)
@@ -246,8 +246,8 @@ class RideHistoryManager(context: Context) {
     fun getDailySummariesLast7Days(): List<Triple<String, String, PeriodSummary>> {
         val cal = Calendar.getInstance()
         val result = mutableListOf<Triple<String, String, PeriodSummary>>()
-        val dayNameFormat = SimpleDateFormat("EEEE", Locale("pt", "BR"))
-        val displayDateFormat = SimpleDateFormat("dd/MM", Locale("pt", "BR"))
+        val dayNameFormat = SimpleDateFormat("EEEE", Locale.forLanguageTag("pt-BR"))
+        val displayDateFormat = SimpleDateFormat("dd/MM", Locale.forLanguageTag("pt-BR"))
         for (i in 6 downTo 0) {
             cal.timeInMillis = System.currentTimeMillis()
             cal.add(Calendar.DAY_OF_YEAR, -i)

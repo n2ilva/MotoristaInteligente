@@ -46,26 +46,19 @@ object RideAnalyzer {
         val timeFactor = getTimeOfDayFactor()
         val adjustedReference = referencePricePerKm / timeFactor
 
-        // Verificar limites definidos pelo motorista
-        val exceedsPickup = pickupDistanceKm > maxPickupDistanceKm
-        val exceedsRideDistance = rideData.distanceKm > maxRideDistanceKm
-        val belowMinPriceKm = effectivePricePerKm < referencePricePerKm
-        val belowMinHourly = earningsPerHour < minEarningsPerHour
-
-        // Recomendação baseada diretamente nos parâmetros do motorista
-        val recommendation = when {
-            exceedsPickup || exceedsRideDistance -> Recommendation.NOT_WORTH_IT
-            belowMinPriceKm -> Recommendation.NOT_WORTH_IT
-            belowMinHourly -> Recommendation.NOT_WORTH_IT
-            effectivePricePerKm >= referencePricePerKm * 1.1 && earningsPerHour >= minEarningsPerHour -> Recommendation.WORTH_IT
-            else -> Recommendation.NEUTRAL
+        // Recomendação baseada SOMENTE no mínimo de R$/km configurado pelo motorista
+        val recommendation = if (effectivePricePerKm >= referencePricePerKm) {
+            Recommendation.WORTH_IT
+        } else {
+            Recommendation.NOT_WORTH_IT
         }
 
         // Motivos
         val reasons = buildReasons(
             pricePerKm, effectivePricePerKm,
             earningsPerHour, pickupDistanceKm, adjustedReference,
-            exceedsPickup, exceedsRideDistance
+            exceedsPickup = false,
+            exceedsRideDistance = false
         )
 
         return RideAnalysis(

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
     IMPORTANTE: NÃO usar android:packageNames aqui!
-    A filtragem por pacote é feita no código do RideInfoAccessibilityService.
+    A filtragem por pacote é feita no código do RideInfoOcrService.
     Se colocar packageNames no XML, o Android SÓ envia eventos desses pacotes exatos,
     e qualquer variação no nome do pacote real impede a detecção.
 -->

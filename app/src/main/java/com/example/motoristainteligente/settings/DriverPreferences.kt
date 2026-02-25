@@ -2,6 +2,7 @@ package com.example.motoristainteligente
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.google.firebase.auth.FirebaseAuth
 
 /**
  * Gerencia as preferências personalizadas do motorista.
@@ -65,6 +66,84 @@ class DriverPreferences(context: Context) {
 
     private val prefs: SharedPreferences =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private var suppressCloudSync = false
+
+    private fun currentUserScope(): String {
+        return FirebaseAuth.getInstance().currentUser?.uid?.takeIf { it.isNotBlank() }
+            ?: "anonymous"
+    }
+
+    private fun scopedKey(baseKey: String): String = "${baseKey}__${currentUserScope()}"
+
+    private fun getScopedFloat(baseKey: String, defaultValue: Float): Float {
+        val scoped = scopedKey(baseKey)
+        if (prefs.contains(scoped)) return prefs.getFloat(scoped, defaultValue)
+
+        if (prefs.contains(baseKey)) {
+            val legacyValue = prefs.getFloat(baseKey, defaultValue)
+            prefs.edit().putFloat(scoped, legacyValue).apply()
+            return legacyValue
+        }
+
+        return defaultValue
+    }
+
+    private fun putScopedFloat(baseKey: String, value: Float) {
+        prefs.edit().putFloat(scopedKey(baseKey), value).apply()
+        onLocalPreferencesChanged()
+    }
+
+    private fun getScopedString(baseKey: String, defaultValue: String): String {
+        val scoped = scopedKey(baseKey)
+        if (prefs.contains(scoped)) {
+            return prefs.getString(scoped, defaultValue) ?: defaultValue
+        }
+
+        if (prefs.contains(baseKey)) {
+            val legacyValue = prefs.getString(baseKey, defaultValue) ?: defaultValue
+            prefs.edit().putString(scoped, legacyValue).apply()
+            return legacyValue
+        }
+
+        return defaultValue
+    }
+
+    private fun putScopedString(baseKey: String, value: String) {
+        prefs.edit().putString(scopedKey(baseKey), value).apply()
+        onLocalPreferencesChanged()
+    }
+
+    private fun getScopedBoolean(baseKey: String, defaultValue: Boolean): Boolean {
+        val scoped = scopedKey(baseKey)
+        if (prefs.contains(scoped)) return prefs.getBoolean(scoped, defaultValue)
+
+        if (prefs.contains(baseKey)) {
+            val legacyValue = prefs.getBoolean(baseKey, defaultValue)
+            prefs.edit().putBoolean(scoped, legacyValue).apply()
+            return legacyValue
+        }
+
+        return defaultValue
+    }
+
+    private fun putScopedBoolean(baseKey: String, value: Boolean) {
+        prefs.edit().putBoolean(scopedKey(baseKey), value).apply()
+        onLocalPreferencesChanged()
+    }
+
+    private fun onLocalPreferencesChanged() {
+        if (suppressCloudSync) return
+        syncToCloud()
+    }
+
+    fun runWithoutCloudSync(block: () -> Unit) {
+        suppressCloudSync = true
+        try {
+            block()
+        } finally {
+            suppressCloudSync = false
+        }
+    }
 
     // ========================
     // Getters
@@ -72,40 +151,40 @@ class DriverPreferences(context: Context) {
 
     /** Valor mínimo aceitável por km (R$/km) */
     var minPricePerKm: Double
-        get() = prefs.getFloat(KEY_MIN_PRICE_PER_KM, DEFAULT_MIN_PRICE_PER_KM.toFloat()).toDouble()
+        get() = getScopedFloat(KEY_MIN_PRICE_PER_KM, DEFAULT_MIN_PRICE_PER_KM.toFloat()).toDouble()
         set(value) {
             val clamped = value.coerceIn(MIN_PRICE_PER_KM_FLOOR, MIN_PRICE_PER_KM_CEIL)
-            prefs.edit().putFloat(KEY_MIN_PRICE_PER_KM, clamped.toFloat()).apply()
+            putScopedFloat(KEY_MIN_PRICE_PER_KM, clamped.toFloat())
         }
 
     /** Ganho mínimo por hora desejado (R$/h) */
     var minEarningsPerHour: Double
-        get() = prefs.getFloat(KEY_MIN_EARNINGS_PER_HOUR, DEFAULT_MIN_EARNINGS_PER_HOUR.toFloat()).toDouble()
+        get() = getScopedFloat(KEY_MIN_EARNINGS_PER_HOUR, DEFAULT_MIN_EARNINGS_PER_HOUR.toFloat()).toDouble()
         set(value) {
             val clamped = value.coerceIn(MIN_EARNINGS_FLOOR, MIN_EARNINGS_CEIL)
-            prefs.edit().putFloat(KEY_MIN_EARNINGS_PER_HOUR, clamped.toFloat()).apply()
+            putScopedFloat(KEY_MIN_EARNINGS_PER_HOUR, clamped.toFloat())
         }
 
     /** Distância máxima para ir buscar o cliente (km) */
     var maxPickupDistance: Double
-        get() = prefs.getFloat(KEY_MAX_PICKUP_DISTANCE, DEFAULT_MAX_PICKUP_DISTANCE.toFloat()).toDouble()
+        get() = getScopedFloat(KEY_MAX_PICKUP_DISTANCE, DEFAULT_MAX_PICKUP_DISTANCE.toFloat()).toDouble()
         set(value) {
             val clamped = value.coerceIn(MAX_PICKUP_FLOOR, MAX_PICKUP_CEIL)
-            prefs.edit().putFloat(KEY_MAX_PICKUP_DISTANCE, clamped.toFloat()).apply()
+            putScopedFloat(KEY_MAX_PICKUP_DISTANCE, clamped.toFloat())
         }
 
     /** Distância máxima da corrida (km) — filtro de corridas muito longas */
     var maxRideDistance: Double
-        get() = prefs.getFloat(KEY_MAX_RIDE_DISTANCE, DEFAULT_MAX_RIDE_DISTANCE.toFloat()).toDouble()
+        get() = getScopedFloat(KEY_MAX_RIDE_DISTANCE, DEFAULT_MAX_RIDE_DISTANCE.toFloat()).toDouble()
         set(value) {
             val clamped = value.coerceIn(MAX_RIDE_DISTANCE_FLOOR, MAX_RIDE_DISTANCE_CEIL)
-            prefs.edit().putFloat(KEY_MAX_RIDE_DISTANCE, clamped.toFloat()).apply()
+            putScopedFloat(KEY_MAX_RIDE_DISTANCE, clamped.toFloat())
         }
 
     /** Se o usuário já fez a configuração inicial */
     var isFirstSetupDone: Boolean
-        get() = prefs.getBoolean(KEY_FIRST_SETUP_DONE, false)
-        set(value) = prefs.edit().putBoolean(KEY_FIRST_SETUP_DONE, value).apply()
+        get() = getScopedBoolean(KEY_FIRST_SETUP_DONE, false)
+        set(value) = putScopedBoolean(KEY_FIRST_SETUP_DONE, value)
 
     // ========================
     // Dados do Veículo
@@ -113,33 +192,33 @@ class DriverPreferences(context: Context) {
 
     /** Tipo do veículo: "combustion" ou "electric" */
     var vehicleType: String
-        get() = prefs.getString(KEY_VEHICLE_TYPE, DEFAULT_VEHICLE_TYPE) ?: DEFAULT_VEHICLE_TYPE
-        set(value) = prefs.edit().putString(KEY_VEHICLE_TYPE, value).apply()
+        get() = getScopedString(KEY_VEHICLE_TYPE, DEFAULT_VEHICLE_TYPE)
+        set(value) = putScopedString(KEY_VEHICLE_TYPE, value)
 
     /** Tipo de combustível preferido: "gasoline" ou "ethanol" */
     var fuelType: String
-        get() = prefs.getString(KEY_FUEL_TYPE, DEFAULT_FUEL_TYPE) ?: DEFAULT_FUEL_TYPE
-        set(value) = prefs.edit().putString(KEY_FUEL_TYPE, value).apply()
+        get() = getScopedString(KEY_FUEL_TYPE, DEFAULT_FUEL_TYPE)
+        set(value) = putScopedString(KEY_FUEL_TYPE, value)
 
     /** Km por litro com gasolina */
     var kmPerLiterGasoline: Double
-        get() = prefs.getFloat(KEY_KM_PER_LITER_GASOLINE, DEFAULT_KM_PER_LITER_GASOLINE.toFloat()).toDouble()
-        set(value) = prefs.edit().putFloat(KEY_KM_PER_LITER_GASOLINE, value.coerceIn(3.0, 30.0).toFloat()).apply()
+        get() = getScopedFloat(KEY_KM_PER_LITER_GASOLINE, DEFAULT_KM_PER_LITER_GASOLINE.toFloat()).toDouble()
+        set(value) = putScopedFloat(KEY_KM_PER_LITER_GASOLINE, value.coerceIn(3.0, 30.0).toFloat())
 
     /** Km por litro com etanol */
     var kmPerLiterEthanol: Double
-        get() = prefs.getFloat(KEY_KM_PER_LITER_ETHANOL, DEFAULT_KM_PER_LITER_ETHANOL.toFloat()).toDouble()
-        set(value) = prefs.edit().putFloat(KEY_KM_PER_LITER_ETHANOL, value.coerceIn(2.0, 25.0).toFloat()).apply()
+        get() = getScopedFloat(KEY_KM_PER_LITER_ETHANOL, DEFAULT_KM_PER_LITER_ETHANOL.toFloat()).toDouble()
+        set(value) = putScopedFloat(KEY_KM_PER_LITER_ETHANOL, value.coerceIn(2.0, 25.0).toFloat())
 
     /** Preço da gasolina (R$/L) */
     var gasolinePrice: Double
-        get() = prefs.getFloat(KEY_GASOLINE_PRICE, DEFAULT_GASOLINE_PRICE.toFloat()).toDouble()
-        set(value) = prefs.edit().putFloat(KEY_GASOLINE_PRICE, value.coerceIn(2.0, 12.0).toFloat()).apply()
+        get() = getScopedFloat(KEY_GASOLINE_PRICE, DEFAULT_GASOLINE_PRICE.toFloat()).toDouble()
+        set(value) = putScopedFloat(KEY_GASOLINE_PRICE, value.coerceIn(2.0, 12.0).toFloat())
 
     /** Preço do etanol (R$/L) */
     var ethanolPrice: Double
-        get() = prefs.getFloat(KEY_ETHANOL_PRICE, DEFAULT_ETHANOL_PRICE.toFloat()).toDouble()
-        set(value) = prefs.edit().putFloat(KEY_ETHANOL_PRICE, value.coerceIn(1.5, 9.0).toFloat()).apply()
+        get() = getScopedFloat(KEY_ETHANOL_PRICE, DEFAULT_ETHANOL_PRICE.toFloat()).toDouble()
+        set(value) = putScopedFloat(KEY_ETHANOL_PRICE, value.coerceIn(1.5, 9.0).toFloat())
 
     /** Custo por km do combustível atual */
     val fuelCostPerKm: Double
@@ -188,7 +267,10 @@ class DriverPreferences(context: Context) {
             newMinHourly = minEarningsPerHour
         )
         RideAnalyzer.updatePickupLimit(maxPickupDistance, maxRideDistance)
-        // Sync com Firestore
+    }
+
+    fun syncToCloud() {
+        if (firestoreManager?.isGoogleUser != true) return
         firestoreManager?.savePreferences(this)
     }
 
@@ -196,11 +278,14 @@ class DriverPreferences(context: Context) {
      * Restaura valores padrão.
      */
     fun resetToDefaults() {
-        minPricePerKm = DEFAULT_MIN_PRICE_PER_KM
-        minEarningsPerHour = DEFAULT_MIN_EARNINGS_PER_HOUR
-        maxPickupDistance = DEFAULT_MAX_PICKUP_DISTANCE
-        maxRideDistance = DEFAULT_MAX_RIDE_DISTANCE
+        runWithoutCloudSync {
+            minPricePerKm = DEFAULT_MIN_PRICE_PER_KM
+            minEarningsPerHour = DEFAULT_MIN_EARNINGS_PER_HOUR
+            maxPickupDistance = DEFAULT_MAX_PICKUP_DISTANCE
+            maxRideDistance = DEFAULT_MAX_RIDE_DISTANCE
+        }
         applyToAnalyzer()
+        syncToCloud()
     }
 
     /**

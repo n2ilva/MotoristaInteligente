@@ -11,13 +11,6 @@ import android.view.Display
 import android.graphics.Rect
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions
-import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 /**
  * Serviço de acessibilidade que monitora os apps Uber Driver e 99 Driver.
@@ -29,7 +22,7 @@ import java.util.Locale
  * Extrai dados da corrida via regex e envia ao FloatingAnalyticsService
  * para análise em tempo real.
  */
-class RideInfoAccessibilityService : AccessibilityService() {
+class RideInfoOcrService : AccessibilityService() {
 
     private data class OfferCandidate(
         val price: Double,
@@ -114,8 +107,13 @@ class RideInfoAccessibilityService : AccessibilityService() {
         // Padrões de extração de dados
         // Aceita: R$ 15,50 / R$15.50 / R$ 8,00 / R$ 125,90 / R$7.5 / R$ 15
         private val PRICE_PATTERN = Regex("""R\$\s*(\d{1,4}(?:[,\.]\d{1,2})?)""")
+        private val KM_IN_PAREN_PATTERN = Regex("""\(\s*(\d{1,3}(?:[,\.]\d+)?)\s*km\s*\)""", RegexOption.IGNORE_CASE)
         // Fallback sem R$: 15,50 / 125.90 (2 casas para evitar conflito com km/min)
         private val FALLBACK_PRICE_PATTERN = Regex("""\b(\d{1,4}[,\.]\d{2})\b""")
+        private val AVG_PRICE_PER_KM_SUFFIX_PATTERN = Regex(
+            """^\s*(?:↑|↗|↖|⇧|⤴|🡅|🔺|🟡|\+)?\s*(?:/\s*km|por\s*km\b|km\b)""",
+            RegexOption.IGNORE_CASE
+        )
         // Aceita: 8.2 km / 8,2km / 12.5 Km / 3km
         private val DISTANCE_PATTERN = Regex("""(\d{1,3}[,\.]?\d*)\s*km""", RegexOption.IGNORE_CASE)
         // Aceita: 15 min / 8min / 20 minutos / 1-3 nmin (OCR)
@@ -278,6 +276,7 @@ class RideInfoAccessibilityService : AccessibilityService() {
         private const val AUTO_DEBUG_MAX_CHARS = 5000
         private const val OCR_FALLBACK_ENABLED = true
         private const val OCR_FALLBACK_MIN_INTERVAL_MS = 1200L  // 1.2s entre tentativas OCR
+        private const val OCR_BOTTOM_HALF_START_FRACTION = 0.3
 
         // Filtro: ignorar nós de acessibilidade no topo da tela (earnings card Uber)
         private const val TOP_SCREEN_FILTER_FRACTION = 0.15  // 15% superior da tela
@@ -338,6 +337,9 @@ class RideInfoAccessibilityService : AccessibilityService() {
     private var lastOfferTimestamp = 0L
     private var lastOfferAlreadyAccepted = false
     private val ACCEPTANCE_DETECTION_WINDOW_MS = 30_000L  // Janela de 30s pós-oferta
+    private var tripInProgress = false
+    private var tripInProgressStartedAt = 0L
+    private val TRIP_MODE_MAX_DURATION_MS = 2 * 60 * 60 * 1000L // 2h
 
     // Padrões que indicam que o motorista ACEITOU a corrida
     // Aparecem quando a tela muda do popup de oferta para o modo "em corrida"
@@ -420,33 +422,19 @@ class RideInfoAccessibilityService : AccessibilityService() {
     }
 
     private fun isMonitoredPackage(packageName: String): Boolean {
-        if (packageName.isOwnPackageName()) return false
-        if (packageName in ALL_MONITORED) return true
-
-        if (ALL_MONITORED.any { packageName.startsWith(it) }) return true
-
-        val lower = packageName.lowercase()
-        val looksLikeUber = lower.contains("uber")
-        val looksLikeNineNine = lower.contains("99") || lower.contains("ninenine")
-        val looksLikeDriverApp = lower.contains("driver") || lower.contains("taxi") || lower.contains("motorista")
-
-        return (looksLikeUber || looksLikeNineNine) && looksLikeDriverApp
+        return RideOcrAppClassifier.isMonitoredPackage(
+            packageName = packageName,
+            ownPackage = OWN_PACKAGE,
+            allMonitored = ALL_MONITORED
+        )
     }
 
     private fun detectAppSource(packageName: String): AppSource {
-        val lower = packageName.lowercase()
-
-        if (packageName in UBER_PACKAGES || UBER_PACKAGES.any { packageName.startsWith(it) } || lower.contains("uber")) {
-            return AppSource.UBER
-        }
-        if (packageName in NINETY_NINE_PACKAGES ||
-            NINETY_NINE_PACKAGES.any { packageName.startsWith(it) } ||
-            lower.contains("99") ||
-            lower.contains("ninenine")
-        ) {
-            return AppSource.NINETY_NINE
-        }
-        return AppSource.UNKNOWN
+        return RideOcrAppClassifier.detectAppSource(
+            packageName = packageName,
+            uberPackages = UBER_PACKAGES,
+            ninetyNinePackages = NINETY_NINE_PACKAGES
+        )
     }
 
     /**
@@ -457,19 +445,7 @@ class RideInfoAccessibilityService : AccessibilityService() {
      * 99: "Corrida Longa - R$ XX" / "Negocia - R$ XX" / "Prioritário - Pop Expresso - R$ XX"
      */
     private fun detectAppSourceFromScreenText(text: String): AppSource {
-        // Verificar padrões da Uber
-        if (UBER_CARD_PATTERN.containsMatchIn(text)) {
-            return AppSource.UBER
-        }
-
-        // Verificar padrões da 99
-        if (NINETY_NINE_CORRIDA_LONGA_PATTERN.containsMatchIn(text) ||
-            NINETY_NINE_NEGOCIA_PATTERN.containsMatchIn(text) ||
-            NINETY_NINE_PRIORITARIO_PATTERN.containsMatchIn(text)) {
-            return AppSource.NINETY_NINE
-        }
-
-        return AppSource.UNKNOWN
+        return RideOcrAppClassifier.detectAppSourceFromScreenText(text)
     }
 
     /**
@@ -643,7 +619,7 @@ class RideInfoAccessibilityService : AccessibilityService() {
             override fun run() {
                 if (!isServiceConnected) return
 
-                if (!AnalysisServiceState.isEnabled(this@RideInfoAccessibilityService)) {
+                if (!AnalysisServiceState.isEnabled(this@RideInfoOcrService)) {
                     debounceHandler.postDelayed(this, HEALTH_CHECK_INTERVAL_MS)
                     return
                 }
@@ -677,6 +653,8 @@ class RideInfoAccessibilityService : AccessibilityService() {
         val rejectionMatch = REJECTION_SIGNALS.any { lower.contains(it) }
         if (rejectionMatch) {
             Log.d(TAG, "✗ Sinal de REJEIÇÃO detectado: '$text' → oferta descartada")
+            tripInProgress = false
+            tripInProgressStartedAt = 0L
             clearOfferState()
             return
         }
@@ -753,6 +731,8 @@ class RideInfoAccessibilityService : AccessibilityService() {
     private fun markOfferAsAccepted(detectionMethod: String, signalText: String) {
         val appSource = lastOfferAppSource ?: return
         lastOfferAlreadyAccepted = true
+        tripInProgress = true
+        tripInProgressStartedAt = System.currentTimeMillis()
 
         // Marcar no DemandTracker
         val marked = DemandTracker.markLastOfferAsAccepted(appSource)
@@ -766,6 +746,55 @@ class RideInfoAccessibilityService : AccessibilityService() {
 
         // Notificar FloatingAnalyticsService para atualizar o status card
         FloatingAnalyticsService.instance?.onRideAccepted(appSource)
+    }
+
+    private fun updateTripModeByText(text: String) {
+        if (!tripInProgress || text.isBlank()) return
+
+        val lower = text.lowercase()
+        val ended = REJECTION_SIGNALS.any { lower.contains(it) } ||
+            lower.contains("corrida finalizada") ||
+            lower.contains("viagem finalizada") ||
+            lower.contains("finalizar corrida") ||
+            lower.contains("você está online") ||
+            lower.contains("procurando corridas")
+
+        if (ended) {
+            tripInProgress = false
+            tripInProgressStartedAt = 0L
+            Log.d(TAG, "Modo corrida em andamento desativado por sinal de fim/cancelamento")
+        }
+    }
+
+    private fun shouldSuppressBecauseTripInProgress(text: String): Boolean {
+        if (!tripInProgress) return false
+
+        val now = System.currentTimeMillis()
+        if (tripInProgressStartedAt > 0L && now - tripInProgressStartedAt > TRIP_MODE_MAX_DURATION_MS) {
+            tripInProgress = false
+            tripInProgressStartedAt = 0L
+            return false
+        }
+
+        val lower = text.lowercase()
+        val hasOfferAction = ACTION_KEYWORDS.any { lower.contains(it) }
+        if (hasOfferAction) return false
+
+        val navigationSignals = listOf(
+            "a caminho", "navegando", "navegação", "rota", "rota iniciada", "iniciar navegação",
+            "dirija", "vire", "continue", "chegar ao passageiro", "chegando", "viagem em andamento",
+            "corrida em andamento", "tempo estimado", "trânsito"
+        )
+
+        if (navigationSignals.any { lower.contains(it) }) {
+            return true
+        }
+
+        val roadLikeCount = Regex("""(?i)\b(?:r(?:ua)?\.?|av(?:enida)?\.?|m(?:arginal)?\.?)\s+[\p{L}\p{N}]""")
+            .findAll(text)
+            .count()
+
+        return roadLikeCount >= 2
     }
 
     /**
@@ -792,164 +821,12 @@ class RideInfoAccessibilityService : AccessibilityService() {
     // ========================
 
     private fun handleNotification(event: AccessibilityEvent, packageName: String) {
-        val text = event.text?.joinToString(" ") ?: return
-        if (text.isBlank()) return
-
-        // Verificar se é texto do nosso próprio card
-        if (isOwnCardText(text)) {
-            Log.d(TAG, "Notificação ignorada: texto do próprio app")
-            return
-        }
-
-        // Notificação da 99 do tipo "Toque para selecionar uma X corrida(s)..."
-        // → sinal de que há corrida disponível, mas o texto da notif não tem dados
-        // → disparar OCR imediatamente para capturar a tela da 99
-        val is99RideSignal = detectAppSource(packageName) == AppSource.NINETY_NINE &&
-            text.contains("corrida", ignoreCase = true)
-
-        if (is99RideSignal && !isLikelyRideOffer(text, isStateChange = true)) {
-            Log.i(TAG, "=== NOTIFICAÇÃO 99 com sinal de corrida (sem dados) → OCR ===")
-            Log.i(TAG, "Texto: ${text.take(300)}")
-            requestOcrFallbackForOffer(packageName, "99-notif-ride-signal")
-            return
-        }
-
-        // Notificação da Uber do tipo "Nova viagem", "Novo pedido", "trip request" etc.
-        // → sinal de que há corrida disponível, mas o texto da notif pode não ter dados completos
-        // → disparar OCR se a notificação não tem preço+km+min
-        val isUberRideSignal = detectAppSource(packageName) == AppSource.UBER &&
-            containsAnyIgnoreCase(text, UBER_NOTIFICATION_RIDE_KEYWORDS)
-
-        if (isUberRideSignal && !isLikelyRideOffer(text, isStateChange = true)) {
-            Log.i(TAG, "=== NOTIFICAÇÃO UBER com sinal de corrida (sem dados) → OCR ===")
-            Log.i(TAG, "Texto: ${text.take(300)}")
-            requestOcrFallbackForOffer(packageName, "uber-notif-ride-signal")
-            return
-        }
-
-        if (!isLikelyRideOffer(text, isStateChange = true)) {
-            Log.d(TAG, "Notificação ignorada por baixa confiança de corrida")
-            return
-        }
-
-        Log.i(TAG, "=== NOTIFICAÇÃO de $packageName ===")
-        Log.i(TAG, "Texto: ${text.take(300)}")
-        // Notificações têm prioridade - são mais confiáveis que window changes
-        tryParseRideData(text, packageName, isNotification = true, extractionSource = "notification")
+        requestOcrFallbackForOffer(packageName, "notification-ocr-only")
     }
 
     private fun handleWindowChange(event: AccessibilityEvent, packageName: String, isStateChange: Boolean) {
-        val eventText = event.text?.joinToString(" ")?.trim().orEmpty()
-
-        val rootNode = try {
-            rootInActiveWindow
-        } catch (e: Exception) {
-            Log.w(TAG, "Erro ao acessar rootInActiveWindow: ${e.message}")
-            null
-        }
-
-        if (rootNode == null) {
-            // Sem root, tentar ler toda a tela
-            val allScreenText = extractAllScreenText()
-            val textToCheck = if (allScreenText.isNotBlank()) allScreenText
-                else if (eventText.isNotBlank()) eventText
-                else ""
-
-            if (textToCheck.isNotBlank() && isRecognizedRideCard(textToCheck)) {
-                Log.d(TAG, "rootInActiveWindow nulo, usando tela inteira (${textToCheck.length} chars)")
-                tryParseRideData(
-                    text = textToCheck,
-                    packageName = packageName,
-                    isNotification = false,
-                    extractionSource = "all-screen"
-                )
-            } else if (textToCheck.isBlank()) {
-                Log.d(TAG, "rootInActiveWindow nulo e tela vazia")
-            }
-            return
-        }
-
-        // Ignorar se rootInActiveWindow é do nosso próprio overlay
-        val rootPackage = rootNode.packageName?.toString() ?: ""
-        if (rootPackage.isOwnPackageName()) {
-            Log.d(TAG, "Ignorado: rootInActiveWindow pertence ao próprio app")
-            return
-        }
-
-        // Extrair texto de TODA a tela (todas as janelas), não só do app do evento
-        val allText = extractAllText(rootNode)
-
-        // Complementar com texto de todas as janelas visíveis
-        val screenText = extractAllScreenText()
-
-        // ===== DETECÇÃO DE ÁRVORE VAZIA PARA APP DE CORRIDA =====
-        // Se o evento vem de Uber/99, mas a árvore de acessibilidade está vazia
-        // (Canvas/React Native sem labels) → OCR agressivo como única saída
-        val isRideApp = detectAppSource(packageName) != AppSource.UNKNOWN
-        val treeIsEmpty = allText.isBlank() && screenText.let { txt ->
-            // Se o screenText só contém texto do SystemUI (status bar), considerar vazio
-            !PRICE_PATTERN.containsMatchIn(txt) &&
-            !FALLBACK_PRICE_PATTERN.containsMatchIn(txt) &&
-            !KM_VALUE_PATTERN.containsMatchIn(txt)
-        }
-
-        if (isRideApp && treeIsEmpty) {
-            val now = System.currentTimeMillis()
-
-            if (now - lastEmptyTreeOcrAt >= EMPTY_TREE_OCR_COOLDOWN_MS) {
-                lastEmptyTreeOcrAt = now
-                Log.i(TAG, "Árvore vazia para ${packageName} — OCR agressivo (cooldown ${EMPTY_TREE_OCR_COOLDOWN_MS}ms)")
-                requestOcrFallbackForOffer(packageName, "empty-tree-ride-app")
-
-                // Agendar retry do OCR após 1.5s se o primeiro não encontrou corrida
-                if (!ocrRetryPending) {
-                    ocrRetryPending = true
-                    pendingOcrRetryRunnable = Runnable {
-                        ocrRetryPending = false
-                        val retryNow = System.currentTimeMillis()
-                        if (retryNow - lastEmptyTreeOcrAt >= EMPTY_TREE_OCR_COOLDOWN_MS) {
-                            lastEmptyTreeOcrAt = retryNow
-                            Log.d(TAG, "OCR retry para ${packageName} (árvore vazia)")
-                            requestOcrFallbackForOffer(packageName, "empty-tree-retry")
-                        }
-                    }
-                    debounceHandler.postDelayed(pendingOcrRetryRunnable!!, EMPTY_TREE_OCR_COOLDOWN_MS)
-                }
-            }
-            return  // Não processar texto do status bar como candidato
-        }
-
-        val combinedText = buildString {
-            if (eventText.isNotBlank()) append(eventText).append(' ')
-            if (allText.isNotBlank()) append(allText).append(' ')
-            if (screenText.isNotBlank()) append(screenText)
-        }.trim()
-
-        val (finalText, extractionSource) = if (combinedText.isBlank()) {
-            val sourceFallback = extractTextFromEventSource(event)
-            if (sourceFallback.isNotBlank()) {
-                Log.d(TAG, "Fallback event.source usado (${sourceFallback.length} chars)")
-                sourceFallback to "event-source"
-            } else {
-                // Texto vazio em todos os fallbacks — OCR para qualquer app
-                if (requestOcrFallbackForOffer(packageName, "empty-text-all-sources")) {
-                    Log.d(TAG, "Texto vazio em todas as fontes → OCR disparado")
-                } else {
-                    Log.d(TAG, "Ignorado: texto vazio + OCR em cooldown")
-                }
-                return
-            }
-        } else {
-            combinedText to "all-screen"
-        }
-
-        val recoveredText = recoverFromForeignIdLeakIfNeeded(finalText, packageName)
-        if (recoveredText.isBlank()) {
-            Log.d(TAG, "Ignorado: conteúdo contaminado por IDs de outro app e sem recuperação")
-            return
-        }
-
-        processCandidateText(recoveredText, packageName, isStateChange, extractionSource)
+        val triggerReason = if (isStateChange) "window-state-ocr-only" else "window-content-ocr-only"
+        requestOcrFallbackForOffer(packageName, triggerReason)
     }
 
     private fun recoverFromForeignIdLeakIfNeeded(text: String, packageName: String): String {
@@ -1001,142 +878,26 @@ class RideInfoAccessibilityService : AccessibilityService() {
             return
         }
 
-        // ===== FAST PATH: Verificar se o texto contém um card de corrida reconhecível =====
-        // Se o texto bater nos padrões específicos de Uber ou 99, processar direto
-        val detectedFromText = detectAppSourceFromScreenText(sanitizedText)
-        if (detectedFromText != AppSource.UNKNOWN) {
-            Log.i(TAG, "=== CARD DE CORRIDA DETECTADO: ${detectedFromText.displayName} ===")
-            Log.i(TAG, "Texto (300 chars): ${sanitizedText.take(300)}")
-            tryParseRideData(
-                text = sanitizedText,
-                packageName = packageName,
-                isNotification = false,
-                extractionSource = normalizeExtractionSource(rootPackage)
-            )
+        updateTripModeByText(sanitizedText)
+        if (shouldSuppressBecauseTripInProgress(sanitizedText)) {
+            val key = "trip-mode-suppressed|$packageName|${if (isStateChange) "STATE" else "CONTENT"}"
+            if (shouldLogDiagnostic(key)) {
+                Log.d(TAG, "Ignorado por modo corrida em andamento (texto de navegação/mapa)")
+            }
             return
         }
 
-        // ===== Se não bateu nos padrões específicos, usar detecção genérica =====
-        val hasPrice = PRICE_PATTERN.containsMatchIn(sanitizedText) || FALLBACK_PRICE_PATTERN.containsMatchIn(sanitizedText)
-        val hasKmToken = KM_VALUE_PATTERN.containsMatchIn(sanitizedText)
-        val hasMinToken = MIN_VALUE_PATTERN.containsMatchIn(sanitizedText) || MIN_RANGE_PATTERN.containsMatchIn(sanitizedText)
+        // ===== OCR-only: corrida válida precisa de "R$" + dois valores em KM =====
+        val hasPrice = PRICE_PATTERN.containsMatchIn(sanitizedText)
+        val hasTwoKmValues = hasAtLeastTwoKmSignals(sanitizedText)
 
-        if (!(hasPrice && hasKmToken && hasMinToken)) {
-            // Fallback via keyword-search e node-search NÃO se aplica quando fonte é OCR
-            if (rootPackage != "ocr-fallback") {
-                val keywordFallback = extractTextByKeywordSearch(packageName)
-                if (keywordFallback.isNotBlank()) {
-                    val hasPriceInFallback = PRICE_PATTERN.containsMatchIn(keywordFallback) || FALLBACK_PRICE_PATTERN.containsMatchIn(keywordFallback)
-                    val hasKmInFallback = KM_VALUE_PATTERN.containsMatchIn(keywordFallback)
-                    val hasMinInFallback = MIN_VALUE_PATTERN.containsMatchIn(keywordFallback) || MIN_RANGE_PATTERN.containsMatchIn(keywordFallback)
-                    if (hasPriceInFallback && hasKmInFallback && hasMinInFallback) {
-                        Log.d(TAG, "Fallback keyword-search encontrou R$ + KM + MIN (${keywordFallback.length} chars)")
-                        processCandidateText(keywordFallback, packageName, isStateChange, "keyword-search")
-                        return
-                    }
-                }
-
-                val nodeOfferFallback = extractOfferTextFromNodes(packageName)
-                if (nodeOfferFallback.isNotBlank()) {
-                    val hasPriceInNode = PRICE_PATTERN.containsMatchIn(nodeOfferFallback) || FALLBACK_PRICE_PATTERN.containsMatchIn(nodeOfferFallback)
-                    val hasKmInNode = KM_VALUE_PATTERN.containsMatchIn(nodeOfferFallback)
-                    val hasMinInNode = MIN_VALUE_PATTERN.containsMatchIn(nodeOfferFallback) || MIN_RANGE_PATTERN.containsMatchIn(nodeOfferFallback)
-                    if (hasPriceInNode && hasKmInNode && hasMinInNode) {
-                        Log.d(TAG, "Fallback node-search encontrou R$ + KM + MIN (${nodeOfferFallback.length} chars)")
-                        processCandidateText(nodeOfferFallback, packageName, isStateChange, "node-search")
-                        return
-                    }
-
-                    // NOVO: Se o nó tem PREÇO mas falta km/min, emitir com dados estimados
-                    // Isso é comum no Uber/99 cuja árvore de acessibilidade expõe só o preço
-                    if (hasPriceInNode) {
-                        val priceMatch = PRICE_PATTERN.find(nodeOfferFallback)
-                            ?: FALLBACK_PRICE_PATTERN.find(nodeOfferFallback)
-                        if (priceMatch != null) {
-                            val priceStr = priceMatch.groupValues[1].replace(",", ".")
-                            val price = priceStr.toDoubleOrNull()
-                            if (price != null && price >= MIN_RIDE_PRICE) {
-                                if (!hasStrongOfferSignalForPriceOnly(nodeOfferFallback)) {
-                                    if (allowOcrFallback) {
-                                        requestOcrFallbackForOffer(packageName, "node-price-only-without-strong-signal")
-                                    }
-                                    return
-                                }
-
-                                // === DEDUP PERSISTENTE: earnings card Uber repete o mesmo preço continuamente ===
-                                val nowDedup = System.currentTimeMillis()
-                                val isSuppressedPrice =
-                                    packageName == suppressedNodePriceOnlyPackage &&
-                                        nowDedup < suppressedNodePriceOnlyUntil &&
-                                        kotlin.math.abs(price - suppressedNodePriceOnlyValue) < 0.01
-                                if (isSuppressedPrice) {
-                                    return
-                                }
-
-                                if (price == lastNodePriceOnlyValue && nowDedup - lastNodePriceOnlyAt < NODE_PRICE_ONLY_DEDUP_WINDOW_MS) {
-                                    nodePriceOnlyRepeatCount++
-                                } else {
-                                    // Preço diferente ou janela expirou — resetar
-                                    lastNodePriceOnlyValue = price
-                                    nodePriceOnlyRepeatCount = 1
-                                }
-                                lastNodePriceOnlyAt = nowDedup
-
-                                if (nodePriceOnlyRepeatCount > NODE_PRICE_ONLY_MAX_REPEATS) {
-                                    suppressedNodePriceOnlyValue = price
-                                    suppressedNodePriceOnlyPackage = packageName
-                                    suppressedNodePriceOnlyUntil = nowDedup + NODE_PRICE_ONLY_SUPPRESSION_HOLD_MS
-
-                                    if (nowDedup - lastNodePriceOnlySuppressionLogAt >= NODE_PRICE_ONLY_SUPPRESSION_LOG_THROTTLE_MS) {
-                                        Log.w(
-                                            TAG,
-                                            "node-price-only SUPRIMIDO: R$ $price repetiu $nodePriceOnlyRepeatCount vezes (quarentena ${NODE_PRICE_ONLY_SUPPRESSION_HOLD_MS}ms, provável earnings card)"
-                                        )
-                                        lastNodePriceOnlySuppressionLogAt = nowDedup
-                                    }
-                                    return
-                                }
-
-                                val detectedApp = detectAppSourceFromScreenText(nodeOfferFallback)
-                                    .takeIf { it != AppSource.UNKNOWN }
-                                    ?: detectAppSource(packageName)
-                                if (detectedApp != AppSource.UNKNOWN) {
-                                    Log.i(TAG, ">>> Emitindo corrida com preço do nó (R$ $price), km/min serão estimados [$packageName]")
-                                    buildAndEmitRideData(
-                                        appSource = detectedApp,
-                                        packageName = packageName,
-                                        price = price,
-                                        rideDistanceKm = null, // será estimado
-                                        rideTimeMin = null,     // será estimado
-                                        pickupDistanceKm = null,
-                                        pickupTimeMin = null,
-                                        userRating = null,
-                                        extractionSource = "node-price-only",
-                                        isNotification = false,
-                                        text = nodeOfferFallback
-                                    )
-                                    // Ainda disparar OCR para tentar complementar na próxima detecção
-                                    if (allowOcrFallback) {
-                                        requestOcrFallbackForOffer(packageName, "node-price-only-complement")
-                                    }
-                                    return
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
+        if (!(hasPrice && hasTwoKmValues)) {
             val key = "missing-core-tokens|$packageName|${if (isStateChange) "STATE" else "CONTENT"}"
             if (shouldLogDiagnostic(key)) {
                 Log.d(
                     TAG,
-                    "Ignorado sem tokens obrigatórios (R$+KM+MIN). hasPrice=$hasPrice, hasKm=$hasKmToken, hasMin=$hasMinToken"
+                    "Ignorado sem tokens obrigatórios OCR-only (R$ + 2x KM). hasPrice=$hasPrice, hasTwoKmValues=$hasTwoKmValues"
                 )
-            }
-
-            if (allowOcrFallback && rootPackage != "ocr-fallback") {
-                requestOcrFallbackForOffer(packageName, "missing-core-tokens")
             }
 
             maybeWriteAutoDebugDump(
@@ -1311,17 +1072,15 @@ class RideInfoAccessibilityService : AccessibilityService() {
 
     private fun isLikelyRideOffer(text: String, isStateChange: Boolean): Boolean {
         // === FAST PATH: Se bater nos padrões específicos de Uber ou 99, ACEITAR direto ===
-        if (isRecognizedRideCard(text)) return true
+        if (isRecognizedRideCard(text) && PRICE_PATTERN.containsMatchIn(text) && hasAtLeastTwoKmSignals(text)) return true
 
-        val hasPrice = PRICE_PATTERN.containsMatchIn(text) || FALLBACK_PRICE_PATTERN.containsMatchIn(text)
+        val hasPrice = PRICE_PATTERN.containsMatchIn(text)
         if (!hasPrice) return false
 
         val actionCount = ACTION_KEYWORDS.count { text.contains(it, ignoreCase = true) }
         val contextCount = CONTEXT_KEYWORDS.count { text.contains(it, ignoreCase = true) }
         val hasKm = KM_VALUE_PATTERN.containsMatchIn(text)
-        val hasMin = MIN_VALUE_PATTERN.containsMatchIn(text)
-        val hasMinRange = MIN_RANGE_PATTERN.containsMatchIn(text)
-        val minRangeCount = MIN_RANGE_PATTERN.findAll(text).count()
+        val hasTwoKmValues = hasAtLeastTwoKmSignals(text)
         val hasExplicitCurrency = text.contains("R$", ignoreCase = true)
         val hasPlusPrice = Regex("""\+\s*R\$\s*\d""").containsMatchIn(text)
 
@@ -1329,14 +1088,11 @@ class RideInfoAccessibilityService : AccessibilityService() {
             (if (actionCount > 0) 3 else 0) +
             (if (contextCount > 0) 2 else 0) +
             (if (hasKm) 2 else 0) +
-            (if (hasMin) 1 else 0) +
-            (if (hasMinRange) 1 else 0) +
+            (if (hasTwoKmValues) 2 else 0) +
             (if (hasExplicitCurrency) 1 else 0) +
-            (if (hasPlusPrice) 1 else 0) +
-            (if (minRangeCount >= 2) 1 else 0)
+            (if (hasPlusPrice) 1 else 0)
 
-        // Regra de atalho para padrão comum da Uber: +R$ + faixas de tempo (ex.: 1-11 min, 1-4 min)
-        val uberLikeOfferPattern = hasPrice && hasMinRange && (minRangeCount >= 2 || hasKm)
+        val uberLikeOfferPattern = hasPrice && hasTwoKmValues && hasKm
 
         // Regra:
         // - Se tiver ação explícita (aceitar/recusar etc), aceitar.
@@ -1345,11 +1101,11 @@ class RideInfoAccessibilityService : AccessibilityService() {
         val accepted = actionCount > 0 || uberLikeOfferPattern || confidence >= if (isStateChange) 3 else 4
 
         if (!accepted) {
-            val key = "confidence-detail|${if (isStateChange) "STATE" else "CONTENT"}|$actionCount|$contextCount|$hasKm|$hasMin|$hasMinRange|$minRangeCount|$hasExplicitCurrency|$hasPlusPrice|$confidence"
+            val key = "confidence-detail|${if (isStateChange) "STATE" else "CONTENT"}|$actionCount|$contextCount|$hasKm|$hasTwoKmValues|$hasExplicitCurrency|$hasPlusPrice|$confidence"
             if (shouldLogDiagnostic(key)) {
                 Log.d(
                     TAG,
-                    "Baixa confiança: action=$actionCount, context=$contextCount, km=$hasKm, min=$hasMin, range=$hasMinRange, ranges=$minRangeCount, moeda=$hasExplicitCurrency, plusPrice=$hasPlusPrice, score=$confidence"
+                    "Baixa confiança: action=$actionCount, context=$contextCount, km=$hasKm, hasTwoKmValues=$hasTwoKmValues, moeda=$hasExplicitCurrency, plusPrice=$hasPlusPrice, score=$confidence"
                 )
             }
         }
@@ -1416,19 +1172,20 @@ class RideInfoAccessibilityService : AccessibilityService() {
         if (text.isBlank()) return false
 
         // Se bater nos padrões específicos de Uber ou 99, é sinal forte
-        if (isRecognizedRideCard(text)) return true
+        if (isRecognizedRideCard(text) && PRICE_PATTERN.containsMatchIn(text) && hasAtLeastTwoKmSignals(text)) return true
 
-        val hasPrice = PRICE_PATTERN.containsMatchIn(text) || FALLBACK_PRICE_PATTERN.containsMatchIn(text)
+        val hasPrice = PRICE_PATTERN.containsMatchIn(text)
         val hasKm = KM_VALUE_PATTERN.containsMatchIn(text)
-        val hasMin = MIN_VALUE_PATTERN.containsMatchIn(text) || MIN_RANGE_PATTERN.containsMatchIn(text)
-        val hasAction = ACTION_KEYWORDS.any { text.contains(it, ignoreCase = true) }
-        val hasContext = CONTEXT_KEYWORDS.any { text.contains(it, ignoreCase = true) }
+        val hasTwoKmValues = hasAtLeastTwoKmSignals(text)
 
-        if (hasPrice && hasKm && hasMin) return true
-        if (hasPrice && hasAction) return true
-        if (hasPrice && hasContext && (hasKm || hasMin)) return true
+        if (hasPrice && hasKm && hasTwoKmValues) return true
 
         return false
+    }
+
+    private fun hasAtLeastTwoKmSignals(text: String): Boolean {
+        val parenthesizedKmCount = KM_IN_PAREN_PATTERN.findAll(text).count()
+        return parenthesizedKmCount >= 2
     }
 
     /**
@@ -1452,7 +1209,66 @@ class RideInfoAccessibilityService : AccessibilityService() {
         }
 
         val cleaned = if (cleanedLines.isNotEmpty()) cleanedLines.joinToString("\n") else text
-        return cleaned.replace(Regex("\\s+"), " ").trim()
+        val withoutDirectionIcons = cleaned
+            .replace("↑", " ")
+            .replace("↗", " ")
+            .replace("↖", " ")
+            .replace("⇧", " ")
+            .replace("⤴", " ")
+            .replace("🡅", " ")
+            .replace("🔺", " ")
+            .replace("🟡", " ")
+        return withoutDirectionIcons.replace(Regex("\\s+"), " ").trim()
+    }
+
+    private fun parsePriceFromMatch(match: MatchResult): Double? {
+        val raw = match.groupValues.getOrNull(1)?.replace(",", ".") ?: return null
+        return raw.toDoubleOrNull()
+    }
+
+    private fun isAvgPerKmPriceMatch(text: String, match: MatchResult): Boolean {
+        val suffixStart = (match.range.last + 1).coerceAtMost(text.length)
+        val suffixEnd = (suffixStart + 20).coerceAtMost(text.length)
+        val suffix = text.substring(suffixStart, suffixEnd)
+
+        if (AVG_PRICE_PER_KM_SUFFIX_PATTERN.containsMatchIn(suffix)) return true
+
+        val prefixStart = (match.range.first - 16).coerceAtLeast(0)
+        val prefix = text.substring(prefixStart, match.range.first)
+        if (prefix.contains("média", ignoreCase = true) ||
+            prefix.contains("media", ignoreCase = true)
+        ) {
+            return true
+        }
+
+        return false
+    }
+
+    private fun selectRidePriceMatch(
+        text: String,
+        appSource: AppSource,
+        priceMatches: List<MatchResult>
+    ): MatchResult? {
+        if (priceMatches.isEmpty()) return null
+
+        val validMatches = priceMatches.filter {
+            parsePriceFromMatch(it)?.let { price -> price >= MIN_RIDE_PRICE } == true
+        }
+        if (validMatches.isEmpty()) return null
+
+        if (appSource != AppSource.NINETY_NINE) {
+            return validMatches.maxByOrNull { parsePriceFromMatch(it) ?: 0.0 }
+        }
+
+        val rideMatches = validMatches.filterNot { isAvgPerKmPriceMatch(text, it) }
+        if (rideMatches.isEmpty()) return validMatches.maxByOrNull { parsePriceFromMatch(it) ?: 0.0 }
+
+        val hasAvgPerKmCompanion = validMatches.size > rideMatches.size
+        return if (hasAvgPerKmCompanion) {
+            rideMatches.minByOrNull { it.range.first }
+        } else {
+            rideMatches.maxByOrNull { parsePriceFromMatch(it) ?: 0.0 }
+        }
     }
 
     // ========================
@@ -1526,37 +1342,46 @@ class RideInfoAccessibilityService : AccessibilityService() {
     private fun parseCardPrice(text: String, appSource: AppSource): Double? {
         return when (appSource) {
             AppSource.UBER -> {
-                val match = UBER_CARD_PATTERN.find(text)
-                val strict = match?.groupValues?.getOrNull(1)?.replace(",", ".")?.toDoubleOrNull()
+                val strict = UBER_CARD_PATTERN.findAll(text)
+                    .mapNotNull { it.groupValues.getOrNull(1)?.replace(",", ".")?.toDoubleOrNull() }
+                    .filter { it >= MIN_RIDE_PRICE }
+                    .maxOrNull()
                 if (strict != null && strict >= MIN_RIDE_PRICE) return strict
 
                 // OCR da Uber às vezes remove os hifens do header.
                 // Ex.: "UberX Exclusivo ... R$ 5,84 Verificado"
-                val fallbackUber = Regex(
+                Regex(
                     """UberX[\s\S]{0,120}?R\$\s*(\d{1,4}(?:[,\.]\d{1,2})?)""",
                     RegexOption.IGNORE_CASE
-                ).find(text)
-                fallbackUber?.groupValues?.getOrNull(1)?.replace(",", ".")?.toDoubleOrNull()
+                ).findAll(text)
+                    .mapNotNull { it.groupValues.getOrNull(1)?.replace(",", ".")?.toDoubleOrNull() }
+                    .filter { it >= MIN_RIDE_PRICE }
+                    .maxOrNull()
             }
             AppSource.NINETY_NINE -> {
-                // Tentar "Corrida Longa [-Negocia] - R$ XX [- R$ YY]" (XX é o preço da corrida)
-                val corridaLonga = NINETY_NINE_CORRIDA_LONGA_PATTERN.find(text)
-                if (corridaLonga != null) {
-                    return corridaLonga.groupValues.getOrNull(1)?.replace(",", ".")?.toDoubleOrNull()
-                }
-                // Tentar "Negocia - R$ XX"
-                val negocia = NINETY_NINE_NEGOCIA_PATTERN.find(text)
-                if (negocia != null) {
-                    return negocia.groupValues.getOrNull(1)?.replace(",", ".")?.toDoubleOrNull()
-                }
-                // Tentar "Prioritário - Pop Expresso - R$ XX [- R$ YY]"
-                val prioritario = NINETY_NINE_PRIORITARIO_PATTERN.find(text)
-                if (prioritario != null) {
-                    return prioritario.groupValues.getOrNull(1)?.replace(",", ".")?.toDoubleOrNull()
-                }
-                // Tentar "Aceitar por R$ XX"
-                val aceitar = NINETY_NINE_ACCEPT_PATTERN.find(text)
-                aceitar?.groupValues?.getOrNull(1)?.replace(",", ".")?.toDoubleOrNull()
+                val corridaLongaMax = NINETY_NINE_CORRIDA_LONGA_PATTERN.findAll(text)
+                    .mapNotNull { it.groupValues.getOrNull(1)?.replace(",", ".")?.toDoubleOrNull() }
+                    .filter { it >= MIN_RIDE_PRICE }
+                    .maxOrNull()
+                val negociaMax = NINETY_NINE_NEGOCIA_PATTERN.findAll(text)
+                    .mapNotNull { it.groupValues.getOrNull(1)?.replace(",", ".")?.toDoubleOrNull() }
+                    .filter { it >= MIN_RIDE_PRICE }
+                    .maxOrNull()
+                val prioritarioMax = NINETY_NINE_PRIORITARIO_PATTERN.findAll(text)
+                    .mapNotNull { it.groupValues.getOrNull(1)?.replace(",", ".")?.toDoubleOrNull() }
+                    .filter { it >= MIN_RIDE_PRICE }
+                    .maxOrNull()
+                val aceitarMax = NINETY_NINE_ACCEPT_PATTERN.findAll(text)
+                    .mapNotNull { it.groupValues.getOrNull(1)?.replace(",", ".")?.toDoubleOrNull() }
+                    .filter { it >= MIN_RIDE_PRICE }
+                    .maxOrNull()
+
+                val strict = listOfNotNull(corridaLongaMax, negociaMax, prioritarioMax, aceitarMax).maxOrNull()
+                if (strict != null) return strict
+
+                val genericMatches = PRICE_PATTERN.findAll(text).toList()
+                val selected = selectRidePriceMatch(text, appSource, genericMatches)
+                selected?.let { parsePriceFromMatch(it) }
             }
             else -> null
         }
@@ -1606,16 +1431,7 @@ class RideInfoAccessibilityService : AccessibilityService() {
         isNotification: Boolean,
         extractionSource: String
     ) {
-        // Detectar app pela CONTEÚDO do texto (não pelo pacote)
-        val textAppSource = detectAppSourceFromScreenText(text)
-        // Fallback: se não detectou pelo texto, tentar pelo pacote
-        val appSource = if (textAppSource != AppSource.UNKNOWN) textAppSource else detectAppSource(packageName)
-
-        // Se não reconheceu como Uber nem 99, ignorar
-        if (appSource == AppSource.UNKNOWN) {
-            Log.d(TAG, "Texto não reconhecido como Uber ou 99 — ignorando")
-            return
-        }
+        val appSource = detectAppSourceFromScreenText(text)
 
         // ========== PASSO 0: Extração por padrões específicos de card Uber/99 ==========
         val cardPrice = parseCardPrice(text, appSource)
@@ -1623,44 +1439,21 @@ class RideInfoAccessibilityService : AccessibilityService() {
             Log.i(TAG, ">>> Preço extraído do card ${appSource.displayName}: R$ $cardPrice")
         }
 
-        // ========== PASSO 1: Tentar extração ESTRUTURADA por nós (mais precisa) ==========
-        val structured = if (!isNotification) {
-            tryStructuredExtraction(packageName)
-        } else null
-
-        if (structured != null && structured.price != null && structured.confidence >= 3) {
-            Log.i(TAG, ">>> Extração ESTRUTURADA bem-sucedida (conf=${structured.confidence}, source=${structured.source})")
-            buildAndEmitRideData(
-                appSource = appSource,
-                packageName = packageName,
-                price = structured.price,
-                rideDistanceKm = structured.rideDistanceKm,
-                rideTimeMin = structured.rideTimeMin,
-                pickupDistanceKm = structured.pickupDistanceKm,
-                pickupTimeMin = structured.pickupTimeMin,
-                userRating = null,
-                extractionSource = "structured-${structured.source}",
-                isNotification = false,
-                text = text
-            )
-            return
-        }
-
-        // ========== PASSO 2: route pairs "Xmin (Ykm)" (99 e Uber) ==========
+        // ========== PASSO 1: route pairs / km em parênteses (OCR-only) ==========
         // Ambos os apps mostram pickup e corrida como pares "min (km)".
         // Mesmo quando source != "ocr", o texto combinado pode conter esse padrão.
         val ocrParsed = parseOcrRoutePairs(text)
 
         if (ocrParsed != null && ocrParsed.price != null) {
-            Log.i(TAG, ">>> Parse OCR route pairs: preço=R$ ${ocrParsed.price}, rideKm=${ocrParsed.rideDistanceKm}, rideMin=${ocrParsed.rideTimeMin}, pickupKm=${ocrParsed.pickupDistanceKm ?: "?"}, pickupMin=${ocrParsed.pickupTimeMin ?: "?"}, rating=${ocrParsed.userRating ?: "?"}")
+            Log.i(TAG, ">>> Parse OCR route pairs: preço=R$ ${ocrParsed.price}, rideKm=${ocrParsed.rideDistanceKm}, pickupKm=${ocrParsed.pickupDistanceKm ?: "?"}, rating=${ocrParsed.userRating ?: "?"}")
             buildAndEmitRideData(
                 appSource = appSource,
                 packageName = packageName,
                 price = ocrParsed.price,
                 rideDistanceKm = ocrParsed.rideDistanceKm,
-                rideTimeMin = ocrParsed.rideTimeMin,
+                rideTimeMin = null,
                 pickupDistanceKm = ocrParsed.pickupDistanceKm,
-                pickupTimeMin = ocrParsed.pickupTimeMin,
+                pickupTimeMin = null,
                 userRating = ocrParsed.userRating,
                 extractionSource = "ocr-route-pairs",
                 isNotification = isNotification,
@@ -1669,13 +1462,13 @@ class RideInfoAccessibilityService : AccessibilityService() {
             return
         }
 
-        // OCR tem pares min(km) mas sem preço R$ — continua para PASSO 3 para buscar preço
+        // OCR tem pares km mas sem preço R$ — continua para PASSO 2 para buscar preço
         if (ocrParsed != null && ocrParsed.rideDistanceKm != null) {
             Log.d(TAG, "OCR: pares encontrados mas sem preço R$ — tentando regex para preço")
-            // Continua para PASSO 3 mas usa dados do OCR como fallback
+            // Continua para PASSO 2 mas usa dados do OCR como fallback
         }
 
-        // ========== PASSO 3: Fallback para parsing por REGEX com desambiguação posicional ==========
+        // ========== PASSO 2: Fallback para parsing por REGEX com desambiguação posicional ==========
         // Se já temos o preço do card específico, usar como prioridade
         if (cardPrice != null && cardPrice >= MIN_RIDE_PRICE) {
             val pricePosition = PRICE_PATTERN.find(text)?.range?.first ?: 0
@@ -1686,27 +1479,21 @@ class RideInfoAccessibilityService : AccessibilityService() {
                 ?: parseRideDistanceFromText(text, pricePosition)
                 ?: estimateDistance(cardPrice)
 
-            val time = ocrParsed?.rideTimeMin
-                ?: disambiguated.rideTimeMin
-                ?: parseRideTimeFromText(text, pricePosition)
-                ?: estimateTime(distance)
-
             val pickupKm = ocrParsed?.pickupDistanceKm ?: disambiguated.pickupDistanceKm
-            val pickupMin = ocrParsed?.pickupTimeMin ?: disambiguated.pickupTimeMin
 
-            // Extrair rating do header do card (Uber: "4,93 (274)" / 99: "4,83 . 287 corridas")
+            // Rating opcional
             val headerRating = parseHeaderRating(text, appSource)
 
-            Log.i(TAG, ">>> Card price parsing: preço=R$ $cardPrice, rideKm=$distance, rideMin=$time, pickupKm=${pickupKm ?: "?"}, pickupMin=${pickupMin ?: "?"}, rating=${headerRating ?: "?"}")
+            Log.i(TAG, ">>> Card price parsing: preço=R$ $cardPrice, rideKm=$distance, pickupKm=${pickupKm ?: "?"}, rating=${headerRating ?: "?"}")
 
             buildAndEmitRideData(
                 appSource = appSource,
                 packageName = packageName,
                 price = cardPrice,
                 rideDistanceKm = distance,
-                rideTimeMin = time,
+                rideTimeMin = null,
                 pickupDistanceKm = pickupKm,
-                pickupTimeMin = pickupMin,
+                pickupTimeMin = null,
                 userRating = headerRating,
                 extractionSource = "${appSource.displayName.lowercase()}-card-pattern",
                 isNotification = isNotification,
@@ -1715,28 +1502,23 @@ class RideInfoAccessibilityService : AccessibilityService() {
             return
         }
 
-        // Se não tiver preço do card, continuar com regex genérico
-        val primaryPriceMatches = PRICE_PATTERN.findAll(text)
-            .filter { it.groupValues[1].replace(",", ".").toDoubleOrNull()?.let { p -> p >= MIN_RIDE_PRICE } == true }
-            .toList()
-        val priceMatches = if (primaryPriceMatches.isNotEmpty()) {
-            primaryPriceMatches
-        } else {
-            FALLBACK_PRICE_PATTERN.findAll(text)
-                .filter { it.groupValues[1].replace(",", ".").toDoubleOrNull()?.let { p -> p >= MIN_RIDE_PRICE } == true }
-                .toList()
-        }
+        // Se não tiver preço do card, continuar com regex genérico EXIGINDO símbolo R$
+        val priceMatches = PRICE_PATTERN.findAll(text).toList()
 
         if (priceMatches.isEmpty()) {
             Log.d(TAG, "Nenhum preço encontrado no texto de $packageName")
             return
         }
 
-        // Posição do preço no texto (usado para desambiguação pickup vs corrida)
-        val pricePosition = priceMatches.first().range.first
+        val selectedPriceMatch = selectRidePriceMatch(text, appSource, priceMatches) ?: run {
+            Log.d(TAG, "Nenhum preço válido encontrado após filtro de média por km no texto de $packageName")
+            return
+        }
+        val pricePosition = selectedPriceMatch.range.first
 
         val bestCandidate = selectBestOfferCandidate(text, priceMatches) ?: return
-        val price = bestCandidate.price
+        val selectedPrice = parsePriceFromMatch(selectedPriceMatch) ?: bestCandidate.price
+        val price = maxOf(bestCandidate.price, selectedPrice)
 
         if (price < MIN_RIDE_PRICE) {
             Log.d(TAG, "Preço muito baixo para ser corrida: R$ $price (mínimo: R$ $MIN_RIDE_PRICE)")
@@ -1753,29 +1535,20 @@ class RideInfoAccessibilityService : AccessibilityService() {
             ?: parseRideDistanceFromText(text, pricePosition)
             ?: estimateDistance(price)
 
-        val time = ocrParsed?.rideTimeMin
-            ?: bestCandidate.estimatedTimeMin
-            ?: disambiguated.rideTimeMin
-            ?: parseRideTimeFromText(text, pricePosition)
-            ?: estimateTime(distance)
-
         val pickupKm = ocrParsed?.pickupDistanceKm
             ?: bestCandidate.pickupDistanceKm
             ?: disambiguated.pickupDistanceKm
-        val pickupMin = ocrParsed?.pickupTimeMin
-            ?: bestCandidate.pickupTimeMin
-            ?: disambiguated.pickupTimeMin
 
-        Log.i(TAG, ">>> Regex parsing: preço=R$ $price, rideKm=$distance, rideMin=$time, pickupKm=${pickupKm ?: "?"}, pickupMin=${pickupMin ?: "?"}")
+        Log.i(TAG, ">>> Regex parsing: preço=R$ $price, rideKm=$distance, pickupKm=${pickupKm ?: "?"}")
 
         buildAndEmitRideData(
             appSource = appSource,
             packageName = packageName,
             price = price,
             rideDistanceKm = distance,
-            rideTimeMin = time,
+            rideTimeMin = null,
             pickupDistanceKm = pickupKm,
-            pickupTimeMin = pickupMin,
+            pickupTimeMin = null,
             userRating = bestCandidate.userRating,
             extractionSource = extractionSource,
             isNotification = isNotification,
@@ -1799,17 +1572,30 @@ class RideInfoAccessibilityService : AccessibilityService() {
         isNotification: Boolean,
         text: String
     ) {
-        val distance = rideDistanceKm ?: estimateDistance(price)
+        val normalizedPrice = normalizeSuspiciousPriceScale(
+            price = price,
+            rideDistanceKm = rideDistanceKm,
+            text = text
+        )
+
+        val hasPriceToken = PRICE_PATTERN.containsMatchIn(text)
+        val kmPairsCount = KM_IN_PAREN_PATTERN.findAll(text).count()
+        if (normalizedPrice <= 0.0 || !hasPriceToken || kmPairsCount < 2) {
+            Log.d(
+                TAG,
+                "Corrida ignorada por critério unificado (R$ + 2x km em parênteses). " +
+                    "price=$normalizedPrice, hasPriceToken=$hasPriceToken, kmPairsCount=$kmPairsCount"
+            )
+            return
+        }
+
+        val distance = rideDistanceKm ?: estimateDistance(normalizedPrice)
         val time = rideTimeMin ?: estimateTime(distance)
 
         // Extrair endereços antes da validação
         val addresses = extractAddresses(text)
 
-        // ===== VALIDAÇÃO: preço obrigatório, endereços opcionais =====
-        if (price <= 0) {
-            Log.d(TAG, "Corrida ignorada: preço inválido (R$ $price)")
-            return
-        }
+        // ===== VALIDAÇÃO: endereços opcionais =====
         // Endereços são OPCIONAIS — muitas corridas válidas não expõem endereços
         // na árvore de acessibilidade (Uber usa React Native, 99 usa Canvas/Compose)
         if (addresses.first.isBlank() || addresses.second.isBlank()) {
@@ -1817,7 +1603,7 @@ class RideInfoAccessibilityService : AccessibilityService() {
         }
 
         // DEDUPLICAÇÃO
-        val contentHash = "${appSource}_${price}_${extractionSource}_${distance}_${time}"
+        val contentHash = "${appSource}_${normalizedPrice}_${extractionSource}_${distance}_${time}"
         val now = System.currentTimeMillis()
         if (contentHash == lastDetectedHash && now - lastDetectedTime < DUPLICATE_SUPPRESSION_WINDOW_MS) {
             Log.d(TAG, "Duplicado ignorado (${now - lastDetectedTime}ms): R$ $price")
@@ -1827,7 +1613,7 @@ class RideInfoAccessibilityService : AccessibilityService() {
 
         val rideData = RideData(
             appSource = appSource,
-            ridePrice = price,
+            ridePrice = normalizedPrice,
             distanceKm = distance,
             estimatedTimeMin = time,
             pickupDistanceKm = pickupDistanceKm,
@@ -1852,7 +1638,7 @@ class RideInfoAccessibilityService : AccessibilityService() {
         Log.i(TAG, "  Fonte: ${if (isNotification) "NOTIFICAÇÃO" else "TELA"}")
         Log.i(TAG, "  Source: $extractionSource")
         Log.i(TAG, "  App: ${appSource.displayName} ($packageName)")
-        Log.i(TAG, "  Preço: R$ $price")
+        Log.i(TAG, "  Preço: R$ $normalizedPrice")
         Log.i(TAG, "  Dist corrida: ${distance}km ($distLabel)")
         Log.i(TAG, "  Dist pickup: ${pickupDistanceKm?.let { "${it}km (extraído)" } ?: "— (GPS)"}")
         Log.i(TAG, "  Tempo corrida: ${time}min ($timeLabel)")
@@ -1918,8 +1704,7 @@ class RideInfoAccessibilityService : AccessibilityService() {
 
     private fun selectBestOfferCandidate(text: String, matches: List<MatchResult>): OfferCandidate? {
         val candidates = matches.mapNotNull { match ->
-            val rawPrice = match.groupValues.getOrNull(1)?.replace(",", ".") ?: return@mapNotNull null
-            val parsedPrice = rawPrice.toDoubleOrNull() ?: return@mapNotNull null
+            val parsedPrice = parsePriceFromMatch(match) ?: return@mapNotNull null
 
             // Contexto expandido: ±250 chars ao redor do preço (antes era 120 — insuficiente)
             val index = match.range.first
@@ -1975,16 +1760,19 @@ class RideInfoAccessibilityService : AccessibilityService() {
             )
         }
 
-        val best = candidates.maxByOrNull { it.score } ?: return null
-        if (best.score < 3) {
+        val bestByScore = candidates.maxByOrNull { it.score } ?: return null
+        val highestPriceCandidate = candidates.maxByOrNull { it.price } ?: return null
+        val chosen = if (candidates.size > 1) highestPriceCandidate else bestByScore
+
+        if (chosen.score < 3 && candidates.size == 1) {
             val key = "offer-candidate-low-score"
             if (shouldLogDiagnostic(key)) {
-                Log.d(TAG, "Oferta rejeitada por baixa pontuação contextual (score=${best.score})")
+                Log.d(TAG, "Oferta rejeitada por baixa pontuação contextual (score=${chosen.score})")
             }
             return null
         }
 
-        return best
+        return chosen
     }
 
     // ========================
@@ -2262,78 +2050,49 @@ class RideInfoAccessibilityService : AccessibilityService() {
      */
     private fun parseOcrRoutePairs(text: String): StructuredExtraction? {
         val routePairs = ROUTE_PAIR_PATTERN.findAll(text).toList()
+        val parenthesizedKm = KM_IN_PAREN_PATTERN.findAll(text)
+            .mapNotNull { it.groupValues.getOrNull(1)?.replace(",", ".")?.toDoubleOrNull() }
+            .filter { it in 0.1..300.0 }
+            .toList()
 
-        // Log detalhado: mostrar todos os pares encontrados com contexto
-        routePairs.forEachIndexed { idx, match ->
-            val contextStart = (match.range.first - 30).coerceAtLeast(0)
-            val contextEnd = (match.range.last + 30).coerceAtMost(text.length - 1)
-            val context = text.substring(contextStart, contextEnd + 1)
-            Log.d(TAG, "OCR route-pair[$idx]: '${match.value}' => min=${match.groupValues[1]}, km=${match.groupValues[2]} | contexto: ...$context...")
+        parenthesizedKm.forEachIndexed { idx, km ->
+            Log.d(TAG, "OCR km-parenteses[$idx]: $km")
         }
 
-        var pickupMin: Int? = null
         var pickupKm: Double? = null
-        var rideMin: Int? = null
         var rideKm: Double? = null
 
-        if (routePairs.size >= 2) {
-            // Caso padrão: 2+ pares min(km) encontrados
-            // O PRIMEIRO par é o pickup (distância até o passageiro)
-            // O SEGUNDO par é a corrida (distância da viagem)
-            val pickupMatch = routePairs[0]
-            val rideMatch = routePairs[1]
+        if (parenthesizedKm.size >= 2) {
+            pickupKm = parenthesizedKm[0]
+            rideKm = parenthesizedKm[1]
+        } else if (routePairs.size >= 2) {
+            pickupKm = routePairs[0].groupValues[2].replace(",", ".").toDoubleOrNull()
+            rideKm = routePairs[1].groupValues[2].replace(",", ".").toDoubleOrNull()
+        } else if (parenthesizedKm.size == 1 || routePairs.size == 1) {
+            pickupKm = parenthesizedKm.firstOrNull()
+                ?: routePairs.firstOrNull()?.groupValues?.getOrNull(2)?.replace(",", ".")?.toDoubleOrNull()
 
-            pickupMin = pickupMatch.groupValues[1].toIntOrNull()
-            pickupKm = pickupMatch.groupValues[2].replace(",", ".").toDoubleOrNull()
-            rideMin = rideMatch.groupValues[1].toIntOrNull()
-            rideKm = rideMatch.groupValues[2].replace(",", ".").toDoubleOrNull()
-        } else if (routePairs.size == 1) {
-            // Só achou 1 par min(km) — o primeiro é pickup.
-            // Tentar achar a corrida no formato "X h YY (Z km)" (Uber viagens longas)
-            val pickupMatch = routePairs[0]
-            pickupMin = pickupMatch.groupValues[1].toIntOrNull()
-            pickupKm = pickupMatch.groupValues[2].replace(",", ".").toDoubleOrNull()
-
-            val hourMatch = UBER_HOUR_ROUTE_PATTERN.find(text)
-            if (hourMatch != null) {
-                val hours = hourMatch.groupValues[1].toIntOrNull() ?: 0
-                val mins = hourMatch.groupValues[2].toIntOrNull() ?: 0
-                rideMin = hours * 60 + mins
-                rideKm = hourMatch.groupValues[3].replace(",", ".").toDoubleOrNull()
-            } else {
-                val tailStart = (pickupMatch.range.last + 1).coerceAtMost(text.length)
-                val tail = text.substring(tailStart)
-
-                // Uber OCR às vezes quebra o 2º par e mantém apenas "XX,X km".
-                val secondKm = KM_VALUE_PATTERN.findAll(tail)
-                    .mapNotNull {
-                        it.value
-                            .replace("km", "", ignoreCase = true)
-                            .trim()
-                            .replace(",", ".")
-                            .toDoubleOrNull()
-                    }
-                    .firstOrNull { km ->
-                        val p = pickupKm ?: 0.0
-                        km > p + 0.4 && km in 0.5..300.0
-                    }
-                if (secondKm != null) {
-                    rideKm = secondKm
+            val tailStart = routePairs.firstOrNull()?.range?.last?.plus(1) ?: 0
+            val tail = text.substring(tailStart.coerceAtMost(text.length))
+            val secondKm = KM_VALUE_PATTERN.findAll(tail)
+                .mapNotNull {
+                    it.value
+                        .replace("km", "", ignoreCase = true)
+                        .trim()
+                        .replace(",", ".")
+                        .toDoubleOrNull()
                 }
-
-                val tripMinutes = Regex("""(?i)viagem\s+de\s*(\d{1,3})\s*min(?:utos?)?""")
-                    .find(tail)
-                    ?.groupValues
-                    ?.getOrNull(1)
-                    ?.toIntOrNull()
-                if (tripMinutes != null && tripMinutes in 1..300) {
-                    rideMin = tripMinutes
+                .firstOrNull { km ->
+                    val p = pickupKm ?: 0.0
+                    km > p + 0.2 && km in 0.5..300.0
                 }
+            if (secondKm != null) {
+                rideKm = secondKm
             }
         }
 
-        if (rideKm == null && rideMin == null) {
-            Log.d(TAG, "OCR route pairs: encontrou ${routePairs.size} par(es) min(km), sem dados de corrida")
+        if (rideKm == null && pickupKm == null) {
+            Log.d(TAG, "OCR route pairs: sem km suficiente para pickup/corrida")
             return null
         }
 
@@ -2343,13 +2102,7 @@ class RideInfoAccessibilityService : AccessibilityService() {
                 val v = m.groupValues[1].replace(",", ".").toDoubleOrNull()
                 v?.takeIf { it >= MIN_RIDE_PRICE }
             }
-            .firstOrNull()
-            ?: FALLBACK_PRICE_PATTERN.findAll(text)
-                .mapNotNull { m ->
-                    val v = m.groupValues[1].replace(",", ".").toDoubleOrNull()
-                    v?.takeIf { it >= MIN_RIDE_PRICE }
-                }
-                .firstOrNull()
+            .maxOrNull()
 
         // Buscar rating do passageiro (★ 4,83 / 4,91 ★ / nota: 4.9)
         val ratingMatch = USER_RATING_PATTERN.find(text)
@@ -2362,26 +2115,63 @@ class RideInfoAccessibilityService : AccessibilityService() {
 
         var confidence = 0
         if (rideKm != null) confidence += 2
-        if (rideMin != null) confidence += 2
         if (pickupKm != null) confidence++
-        if (pickupMin != null) confidence++
         if (priceMatch != null) confidence++
         if (rating != null) confidence++
 
-        Log.d(TAG, "OCR route pairs: pickup=($pickupMin min, $pickupKm km), ride=($rideMin min, $rideKm km), price=$priceMatch, rating=$rating, conf=$confidence")
+        Log.d(TAG, "OCR route pairs: pickup=($pickupKm km), ride=($rideKm km), price=$priceMatch, rating=$rating, conf=$confidence")
 
         if (confidence < 4) return null // precisa de dados mínimos
 
         return StructuredExtraction(
             price = priceMatch,
             rideDistanceKm = rideKm,
-            rideTimeMin = rideMin,
+            rideTimeMin = null,
             pickupDistanceKm = pickupKm,
-            pickupTimeMin = pickupMin,
+            pickupTimeMin = null,
             userRating = rating,
             confidence = confidence,
             source = "ocr-route-pairs"
         )
+    }
+
+    private fun normalizeSuspiciousPriceScale(
+        price: Double,
+        rideDistanceKm: Double?,
+        text: String
+    ): Double {
+        if (price < 100.0) return price
+
+        val kmReference = rideDistanceKm
+            ?: KM_IN_PAREN_PATTERN.findAll(text)
+                .mapNotNull { it.groupValues.getOrNull(1)?.replace(",", ".")?.toDoubleOrNull() }
+                .filter { it in 0.2..300.0 }
+                .toList()
+                .let { if (it.size >= 2) it[1] else it.lastOrNull() }
+
+        if (kmReference == null || kmReference <= 0.0) return price
+
+        val originalPricePerKm = price / kmReference
+        if (originalPricePerKm <= 60.0) return price
+
+        val candidates = listOf(price / 10.0, price / 100.0)
+            .filter { it >= MIN_RIDE_PRICE }
+
+        val corrected = candidates
+            .map { candidate -> candidate to (candidate / kmReference) }
+            .filter { (_, valuePerKm) -> valuePerKm in 0.6..35.0 }
+            .minByOrNull { (_, valuePerKm) -> kotlin.math.abs(valuePerKm - 2.5) }
+            ?.first
+
+        if (corrected != null) {
+            Log.w(
+                TAG,
+                "Preço ajustado por validação anti-escala OCR: original=R$ $price, corrigido=R$ $corrected, kmRef=$kmReference"
+            )
+            return corrected
+        }
+
+        return price
     }
 
     /**
@@ -2432,32 +2222,12 @@ class RideInfoAccessibilityService : AccessibilityService() {
      * Suporta formato Uber "X h YY (Z km)" para viagens longas.
      */
     private fun parseRideDistanceFromText(text: String, pricePosition: Int): Double? {
-        val afterPrice = if (pricePosition < text.length) text.substring(pricePosition) else text
-
-        // Tentar formato em horas da Uber: "1 h 30 (50 km)" → km=50
-        val hourMatch = UBER_HOUR_ROUTE_PATTERN.find(afterPrice)
-        if (hourMatch != null) {
-            val km = hourMatch.groupValues[3].replace(",", ".").toDoubleOrNull()
-            if (km != null && km in 0.2..500.0) return km
-        }
-
-        val afterMatch = DISTANCE_PATTERN.find(afterPrice)
-        if (afterMatch != null) {
-            val v = afterMatch.groupValues.getOrNull(1)?.replace(",", ".")?.toDoubleOrNull()
-            if (v != null && v in 0.2..300.0) return v
-        }
-
-        // Se não achou após o preço, pegar todos e retornar o MAIOR (provável corrida vs pickup)
-        val allMatches = DISTANCE_PATTERN.findAll(text)
-            .mapNotNull { it.groupValues.getOrNull(1)?.replace(",", ".")?.toDoubleOrNull() }
-            .filter { it in 0.2..300.0 }
-            .toList()
-
-        return if (allMatches.size >= 2) {
-            allMatches.maxOrNull()
-        } else {
-            allMatches.firstOrNull()
-        }
+        return RideInfoTextParsers.parseRideDistanceFromText(
+            text = text,
+            pricePosition = pricePosition,
+            uberHourRoutePattern = UBER_HOUR_ROUTE_PATTERN,
+            distancePattern = DISTANCE_PATTERN
+        )
     }
 
     /**
@@ -2465,57 +2235,20 @@ class RideInfoAccessibilityService : AccessibilityService() {
      * Suporta formato "X h YY (Z km)" da Uber para viagens longas.
      */
     private fun parseRideTimeFromText(text: String, pricePosition: Int): Int? {
-        val afterPrice = if (pricePosition < text.length) text.substring(pricePosition) else text
-
-        // Tentar formato em horas da Uber: "1 h 30 (50 km)" → 90 min
-        val hourMatch = UBER_HOUR_ROUTE_PATTERN.find(afterPrice)
-        if (hourMatch != null) {
-            val hours = hourMatch.groupValues[1].toIntOrNull() ?: 0
-            val mins = hourMatch.groupValues[2].toIntOrNull() ?: 0
-            val totalMin = hours * 60 + mins
-            if (totalMin in 1..600) return totalMin
-        }
-
-        val rangeMatch = MIN_RANGE_PATTERN.find(afterPrice)
-        if (rangeMatch != null) {
-            val max = Regex("""\d{1,3}""").findAll(rangeMatch.value)
-                .mapNotNull { it.value.toIntOrNull() }
-                .maxOrNull()
-            if (max != null) return max.coerceIn(1, 300)
-        }
-
-        val simpleMatch = TIME_PATTERN.find(afterPrice)
-        val v = simpleMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
-        if (v != null && v in 1..300) return v
-
-        // Fallback: tentar hora em todo o texto
-        val hourMatchAll = UBER_HOUR_ROUTE_PATTERN.find(text)
-        if (hourMatchAll != null) {
-            val hours = hourMatchAll.groupValues[1].toIntOrNull() ?: 0
-            val mins = hourMatchAll.groupValues[2].toIntOrNull() ?: 0
-            val totalMin = hours * 60 + mins
-            if (totalMin in 1..600) return totalMin
-        }
-
-        val allMatches = TIME_PATTERN.findAll(text)
-            .mapNotNull { it.groupValues.getOrNull(1)?.toIntOrNull() }
-            .filter { it in 1..300 }
-            .toList()
-
-        return if (allMatches.size >= 2) {
-            allMatches.maxOrNull()
-        } else {
-            allMatches.firstOrNull()
-        }
+        return RideInfoTextParsers.parseRideTimeFromText(
+            text = text,
+            pricePosition = pricePosition,
+            uberHourRoutePattern = UBER_HOUR_ROUTE_PATTERN,
+            minRangePattern = MIN_RANGE_PATTERN,
+            timePattern = TIME_PATTERN
+        )
     }
 
     /**
      * Extrai o PRIMEIRO valor em km de um fragmento de texto.
      */
     private fun parseFirstKmValue(text: String): Double? {
-        val match = DISTANCE_PATTERN.find(text) ?: return null
-        val v = match.groupValues.getOrNull(1)?.replace(",", ".")?.toDoubleOrNull() ?: return null
-        return v.takeIf { it in 0.1..300.0 }
+        return RideInfoTextParsers.parseFirstKmValue(text, DISTANCE_PATTERN)
     }
 
     /**
@@ -2523,94 +2256,45 @@ class RideInfoAccessibilityService : AccessibilityService() {
      * Inclui suporte a ranges como "1-11 min" (retorna o máximo).
      */
     private fun parseFirstMinValue(text: String): Int? {
-        val rangeMatch = MIN_RANGE_PATTERN.find(text)
-        val simpleMatch = TIME_PATTERN.find(text)
-
-        // Se range aparece antes ou é a única opção, usar o range (max)
-        if (rangeMatch != null && (simpleMatch == null || rangeMatch.range.first <= simpleMatch.range.first)) {
-            val max = Regex("""\d{1,3}""").findAll(rangeMatch.value)
-                .mapNotNull { it.value.toIntOrNull() }
-                .maxOrNull()
-            if (max != null) return max.coerceIn(1, 300)
-        }
-
-        val v = simpleMatch?.groupValues?.getOrNull(1)?.toIntOrNull() ?: return null
-        return v.takeIf { it in 1..300 }
+        return RideInfoTextParsers.parseFirstMinValue(
+            text = text,
+            minRangePattern = MIN_RANGE_PATTERN,
+            timePattern = TIME_PATTERN
+        )
     }
 
     private fun parseDistanceFromText(text: String): Double? {
-        return DISTANCE_PATTERN.find(text)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.replace(",", ".")
-            ?.toDoubleOrNull()
-            ?.takeIf { it in 0.2..300.0 }
+        return RideInfoTextParsers.parseDistanceFromText(text, DISTANCE_PATTERN)
     }
 
     private fun parseMinutesFromText(text: String): Int? {
-        val rangeMatch = MIN_RANGE_PATTERN.find(text)
-        if (rangeMatch != null) {
-            val values = Regex("""\d{1,3}""").findAll(rangeMatch.value)
-                .mapNotNull { it.value.toIntOrNull() }
-                .toList()
-            val max = values.maxOrNull()
-            if (max != null) return max.coerceIn(1, 300)
-        }
-
-        val minMatch = MIN_VALUE_PATTERN.find(text)
-        val parsed = minMatch
-            ?.value
-            ?.let { Regex("""\d{1,3}""").find(it)?.value }
-            ?.toIntOrNull()
-
-        return parsed?.coerceIn(1, 300)
+        return RideInfoTextParsers.parseMinutesFromText(
+            text = text,
+            minRangePattern = MIN_RANGE_PATTERN,
+            minValuePattern = MIN_VALUE_PATTERN
+        )
     }
 
     private fun parsePickupDistanceFromText(text: String): Double? {
-        // 1. Padrão explícito: "buscar/embarque/pickup... X km"
-        val explicit = PICKUP_DISTANCE_PATTERN.find(text)
-        if (explicit != null) {
-            val v = explicit.groupValues.getOrNull(1)?.replace(",", ".")?.toDoubleOrNull()
-            if (v != null && v in 0.1..50.0) return v
-        }
-        // 2. Padrão inline: "X min (Y km)" — se aparece ANTES do preço, provavelmente é pickup
-        val priceIdx = PRICE_PATTERN.find(text)?.range?.first ?: text.length
-        val inlineMatches = PICKUP_INLINE_PATTERN.findAll(text).toList()
-        for (m in inlineMatches) {
-            if (m.range.first < priceIdx) {
-                val km = m.groupValues.getOrNull(2)?.replace(",", ".")?.toDoubleOrNull()
-                if (km != null && km in 0.1..50.0) return km
-            }
-        }
-        return null
+        return RideInfoTextParsers.parsePickupDistanceFromText(
+            text = text,
+            pickupDistancePattern = PICKUP_DISTANCE_PATTERN,
+            pickupInlinePattern = PICKUP_INLINE_PATTERN,
+            pricePattern = PRICE_PATTERN
+        )
     }
 
     private fun parsePickupTimeFromText(text: String): Int? {
-        // 1. Padrão explícito: "buscar/embarque/pickup... X min"
-        val explicit = PICKUP_TIME_PATTERN.find(text)
-        if (explicit != null) {
-            val v = explicit.groupValues.getOrNull(1)?.toIntOrNull()
-            if (v != null && v in 1..120) return v
-        }
-        // 2. Padrão inline antes do preço
-        val priceIdx = PRICE_PATTERN.find(text)?.range?.first ?: text.length
-        val inlineMatches = PICKUP_INLINE_PATTERN.findAll(text).toList()
-        for (m in inlineMatches) {
-            if (m.range.first < priceIdx) {
-                val min = m.groupValues.getOrNull(1)?.toIntOrNull()
-                if (min != null && min in 1..120) return min
-            }
-        }
-        return null
+        return RideInfoTextParsers.parsePickupTimeFromText(
+            text = text,
+            pickupTimePattern = PICKUP_TIME_PATTERN,
+            pickupInlinePattern = PICKUP_INLINE_PATTERN,
+            pricePattern = PRICE_PATTERN
+        )
     }
 
     private fun parseUserRatingFromText(text: String): Double? {
-        val match = USER_RATING_PATTERN.find(text) ?: return null
-        val raw = match.groupValues.getOrNull(1).orEmpty().ifBlank {
-            match.groupValues.getOrNull(2).orEmpty()
-        }
-        val rating = raw.replace(",", ".").toDoubleOrNull() ?: return null
-        return rating.takeIf { it in 1.0..5.0 }
+        return RideInfoTextParsers.parseUserRatingFromText(text, USER_RATING_PATTERN)
     }
 
     private fun requestOcrFallbackForOffer(packageName: String, triggerReason: String): Boolean {
@@ -2653,36 +2337,26 @@ class RideInfoAccessibilityService : AccessibilityService() {
                                 return
                             }
 
-                            val inputImage = InputImage.fromBitmap(bitmap, 0)
-                            val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-
-                            recognizer.process(inputImage)
-                                .addOnSuccessListener { visionText ->
-                                    val rawOcrText = visionText.text.orEmpty().trim()
-                                    val ocrText = sanitizeTextForRideParsing(rawOcrText)
-                                    if (ocrText.isBlank()) {
-                                        Log.i(TAG, "OCR fallback: texto vazio (trigger=$triggerReason)")
-                                        return@addOnSuccessListener
-                                    }
-
-                                    Log.i(TAG, "OCR capturou ${ocrText.length} chars (trigger=$triggerReason): ${ocrText.take(250).replace('\n', ' ')}")
-
-                                    if (hasStrongRideSignal(ocrText)) {
-                                        Log.i(TAG, "OCR encontrou sinal forte de corrida (${ocrText.length} chars), trigger=$triggerReason")
-                                        processCandidateText(
-                                            finalText = ocrText,
-                                            packageName = packageName,
-                                            isStateChange = false,
-                                            rootPackage = "ocr-fallback",
-                                            allowOcrFallback = false
-                                        )
-                                    } else {
-                                        Log.i(TAG, "OCR sem sinal forte (trigger=$triggerReason) — hasPrice=${PRICE_PATTERN.containsMatchIn(ocrText) || FALLBACK_PRICE_PATTERN.containsMatchIn(ocrText)}, hasKm=${KM_VALUE_PATTERN.containsMatchIn(ocrText)}, hasMin=${MIN_VALUE_PATTERN.containsMatchIn(ocrText) || MIN_RANGE_PATTERN.containsMatchIn(ocrText)}")
-                                    }
+                            RideOcrFallbackProcessor.processBitmap(
+                                bitmap = bitmap,
+                                packageName = packageName,
+                                triggerReason = triggerReason,
+                                tag = TAG,
+                                bottomHalfStartFraction = OCR_BOTTOM_HALF_START_FRACTION,
+                                pricePattern = PRICE_PATTERN,
+                                sanitizeText = ::sanitizeTextForRideParsing,
+                                hasStrongRideSignal = ::hasStrongRideSignal,
+                                hasAtLeastTwoKmSignals = ::hasAtLeastTwoKmSignals,
+                                onStrongSignal = { ocrText ->
+                                    processCandidateText(
+                                        finalText = ocrText,
+                                        packageName = packageName,
+                                        isStateChange = false,
+                                        rootPackage = "ocr-fallback",
+                                        allowOcrFallback = false
+                                    )
                                 }
-                                .addOnFailureListener { e ->
-                                    Log.w(TAG, "OCR fallback falhou (trigger=$triggerReason): ${e.message}")
-                                }
+                            )
                         } catch (e: Exception) {
                             Log.w(TAG, "OCR fallback erro no processamento (trigger=$triggerReason): ${e.message}")
                         }
@@ -2715,200 +2389,48 @@ class RideInfoAccessibilityService : AccessibilityService() {
         lastAutoDebugDumpAt = now
 
         try {
-            val dumpDir = File(filesDir, "debug_dumps")
-            if (!dumpDir.exists()) dumpDir.mkdirs()
+            val allWindows = windows
+            val windowsText = extractTextFromInteractiveWindows(packageName)
+            val nodeOfferText = extractOfferTextFromNodes(packageName)
+            val relevantNodes = RideOcrAutoDebugDumpHelper.buildRelevantNodesSnapshot(
+                allWindows = allWindows,
+                expectedPackage = packageName,
+                maxNodes = 60,
+                ownPackage = OWN_PACKAGE,
+                detectAppSource = ::detectAppSource,
+                pricePattern = PRICE_PATTERN,
+                fallbackPricePattern = FALLBACK_PRICE_PATTERN,
+                kmValuePattern = KM_VALUE_PATTERN,
+                minValuePattern = MIN_VALUE_PATTERN,
+                minRangePattern = MIN_RANGE_PATTERN
+            )
+            val windowInventory = RideOcrAutoDebugDumpHelper.buildWindowInventory(allWindows)
+            val allNodesSnapshot = RideOcrAutoDebugDumpHelper.buildAllNodesSnapshot(
+                allWindows = allWindows,
+                maxNodes = 100,
+                ownPackage = OWN_PACKAGE
+            )
 
-            val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date(now))
-            val appTag = when (detectAppSource(packageName)) {
-                AppSource.UBER -> "uber"
-                AppSource.NINETY_NINE -> "99"
-                else -> "unknown"
-            }
-            val file = File(dumpDir, "${appTag}_${reason}_$timestamp.txt")
+            val file = RideOcrAutoDebugDumpHelper.writeAutoDebugDump(
+                filesDir = filesDir,
+                now = now,
+                reason = reason,
+                packageName = packageName,
+                event = event,
+                eventText = eventText,
+                sourceText = sourceText,
+                windowsText = windowsText,
+                nodeOfferText = nodeOfferText,
+                relevantNodes = relevantNodes,
+                windowInventory = windowInventory,
+                allNodesSnapshot = allNodesSnapshot,
+                autoDebugMaxChars = AUTO_DEBUG_MAX_CHARS,
+                detectAppSource = ::detectAppSource
+            )
 
-            val eventType = event?.let { AccessibilityEvent.eventTypeToString(it.eventType) } ?: "N/A"
-            val contentChange = event?.contentChangeTypes ?: 0
-            val windowsText = extractTextFromInteractiveWindows(packageName).take(AUTO_DEBUG_MAX_CHARS)
-            val nodeOfferText = extractOfferTextFromNodes(packageName).take(AUTO_DEBUG_MAX_CHARS)
-            val relevantNodes = buildRelevantNodesSnapshot(packageName, maxNodes = 60)
-
-            // Inventário de janelas (sem filtro de pacote)
-            val windowInventory = buildWindowInventory()
-            // Dump completo de TODOS os nós (não apenas os "úteis")
-            val allNodesSnapshot = buildAllNodesSnapshot(packageName, maxNodes = 100)
-
-            val payload = buildString {
-                appendLine("timestamp=$timestamp")
-                appendLine("reason=$reason")
-                appendLine("package=$packageName")
-                appendLine("eventType=$eventType")
-                appendLine("contentChangeTypes=$contentChange")
-                appendLine()
-                appendLine("[eventText]")
-                appendLine(eventText.take(AUTO_DEBUG_MAX_CHARS))
-                appendLine()
-                appendLine("[sourceText]")
-                appendLine(sourceText.take(AUTO_DEBUG_MAX_CHARS))
-                appendLine()
-                appendLine("[nodeOfferText]")
-                appendLine(nodeOfferText)
-                appendLine()
-                appendLine("[windowsText]")
-                appendLine(windowsText)
-                appendLine()
-                appendLine("[relevantNodes]")
-                appendLine(relevantNodes)
-                appendLine()
-                appendLine("[windowInventory]")
-                appendLine(windowInventory)
-                appendLine()
-                appendLine("[allNodes]")
-                appendLine(allNodesSnapshot)
-            }
-
-            file.writeText(payload)
             Log.i(TAG, "AUTO_DEBUG_DUMP salvo: ${file.absolutePath}")
         } catch (e: Exception) {
             Log.w(TAG, "Falha ao salvar AUTO_DEBUG_DUMP: ${e.message}")
-        }
-    }
-
-    private fun buildRelevantNodesSnapshot(expectedPackage: String, maxNodes: Int): String {
-        return try {
-            val allWindows = windows ?: return ""
-            val expectedSource = detectAppSource(expectedPackage)
-            val lines = mutableListOf<String>()
-
-            fun collect(node: AccessibilityNodeInfo?, depth: Int) {
-                if (node == null || depth > 10 || lines.size >= maxNodes) return
-
-                val rid = node.viewIdResourceName.orEmpty()
-                val text = node.text?.toString().orEmpty().trim()
-                val desc = node.contentDescription?.toString().orEmpty().trim()
-                val merged = listOf(text, desc).filter { it.isNotBlank() }.joinToString(" | ")
-
-                val looksUseful =
-                    merged.isNotBlank() &&
-                        (
-                            PRICE_PATTERN.containsMatchIn(merged) ||
-                                FALLBACK_PRICE_PATTERN.containsMatchIn(merged) ||
-                                KM_VALUE_PATTERN.containsMatchIn(merged) ||
-                                MIN_VALUE_PATTERN.containsMatchIn(merged) ||
-                                MIN_RANGE_PATTERN.containsMatchIn(merged) ||
-                                merged.contains("R$", ignoreCase = true) ||
-                                merged.contains("km", ignoreCase = true) ||
-                                merged.contains("min", ignoreCase = true) ||
-                                merged.contains("aceitar", ignoreCase = true) ||
-                                merged.contains("corrida", ignoreCase = true) ||
-                                merged.contains("99", ignoreCase = true) ||
-                                merged.contains("viagem", ignoreCase = true) ||
-                                merged.contains("destino", ignoreCase = true)
-                        )
-
-                if (looksUseful) {
-                    lines.add("d=$depth rid=$rid class=${node.className ?: ""} text=$text desc=$desc")
-                }
-
-                for (i in 0 until node.childCount) {
-                    val child = try { node.getChild(i) } catch (_: Exception) { null }
-                    collect(child, depth + 1)
-                    if (lines.size >= maxNodes) break
-                }
-            }
-
-            for (window in allWindows) {
-                val root = try { window.root } catch (_: Exception) { null } ?: continue
-                val rootPkg = root.packageName?.toString().orEmpty()
-                val rootSource = detectAppSource(rootPkg)
-                val shouldUseWindow =
-                    rootPkg.isNotBlank() &&
-                        rootPkg != OWN_PACKAGE &&
-                        (rootPkg == expectedPackage ||
-                            rootPkg.startsWith(expectedPackage) ||
-                            expectedPackage.startsWith(rootPkg) ||
-                            (expectedSource != AppSource.UNKNOWN && rootSource == expectedSource))
-
-                if (shouldUseWindow) {
-                    collect(root, 0)
-                }
-                if (lines.size >= maxNodes) break
-            }
-
-            lines.joinToString("\n")
-        } catch (_: Exception) {
-            ""
-        }
-    }
-
-    /**
-     * Inventário de TODAS as janelas disponíveis (sem filtro de pacote).
-     * Mostra qual pacote cada janela pertence, se tem root, etc.
-     */
-    private fun buildWindowInventory(): String {
-        return try {
-            val allWindows = windows ?: return "(windows null)"
-            val lines = mutableListOf<String>()
-            for ((idx, window) in allWindows.withIndex()) {
-                val root = try { window.root } catch (_: Exception) { null }
-                val rootPkg = root?.packageName?.toString() ?: "(null)"
-                val childCount = root?.childCount ?: 0
-                val rootText = root?.text?.toString()?.take(50) ?: ""
-                val rootDesc = root?.contentDescription?.toString()?.take(50) ?: ""
-                val windowType = try { window.type } catch (_: Exception) { -1 }
-                val windowLayer = try { window.layer } catch (_: Exception) { -1 }
-                lines.add("win[$idx] pkg=$rootPkg type=$windowType layer=$windowLayer children=$childCount text=$rootText desc=$rootDesc")
-            }
-            if (lines.isEmpty()) "(nenhuma janela)"
-            else lines.joinToString("\n")
-        } catch (e: Exception) {
-            "Erro: ${e.message}"
-        }
-    }
-
-    /**
-     * Snapshot de TODOS os nós com texto (sem filtro semântico).
-     * Para diagnóstico quando os nós filtrados retornam vazio.
-     */
-    private fun buildAllNodesSnapshot(expectedPackage: String, maxNodes: Int): String {
-        return try {
-            val allWindows = windows ?: return ""
-            val lines = mutableListOf<String>()
-
-            fun collect(node: AccessibilityNodeInfo?, depth: Int, windowPkg: String) {
-                if (node == null || depth > 12 || lines.size >= maxNodes) return
-
-                val rid = node.viewIdResourceName.orEmpty()
-                val text = node.text?.toString().orEmpty().trim()
-                val desc = node.contentDescription?.toString().orEmpty().trim()
-                val cls = node.className?.toString().orEmpty()
-
-                // Capturar QUALQUER nó com texto ou desc (sem filtro)
-                if (text.isNotBlank() || desc.isNotBlank()) {
-                    lines.add("d=$depth pkg=$windowPkg rid=$rid cls=$cls t=${text.take(80)} cd=${desc.take(80)}")
-                }
-
-                for (i in 0 until node.childCount) {
-                    val child = try { node.getChild(i) } catch (_: Exception) { null }
-                    collect(child, depth + 1, windowPkg)
-                    if (lines.size >= maxNodes) break
-                }
-            }
-
-            for (window in allWindows) {
-                val root = try { window.root } catch (_: Exception) { null } ?: continue
-                val rootPkg = root.packageName?.toString().orEmpty()
-
-                // Não filtrar por pacote — capturar TODOS para diagnóstico
-                if (rootPkg != OWN_PACKAGE) {
-                    collect(root, 0, rootPkg)
-                }
-                if (lines.size >= maxNodes) break
-            }
-
-            if (lines.isEmpty()) "(nenhum nó com texto)"
-            else lines.joinToString("\n")
-        } catch (e: Exception) {
-            "Erro: ${e.message}"
         }
     }
 
@@ -2931,154 +2453,9 @@ class RideInfoAccessibilityService : AccessibilityService() {
      * Tenta extrair endereços de embarque e destino do texto.
      */
     private fun extractAddresses(text: String): Pair<String, String> {
-        // 1. Formato universal: usar pares min(km) e capturar endereço logo após cada par.
-        // Regra solicitada: endereço do passageiro após 1º par; destino após 2º par.
-        val routePairs = ROUTE_PAIR_PATTERN.findAll(text).toList()
-        if (routePairs.size >= 2) {
-            val firstPairEnd = routePairs[0].range.last + 1
-            val secondPairStart = routePairs[1].range.first
-            val secondPairEnd = routePairs[1].range.last + 1
-
-            val pickupSegment = if (firstPairEnd < secondPairStart) {
-                text.substring(firstPairEnd, secondPairStart)
-            } else ""
-
-            val dropoffSegment = if (secondPairEnd < text.length) {
-                text.substring(secondPairEnd)
-            } else ""
-
-            val pickup = extractBestAddressFromSegment(pickupSegment)
-            val dropoff = extractBestAddressFromSegment(dropoffSegment)
-
-            if (pickup.isNotBlank() || dropoff.isNotBlank()) {
-                return Pair(pickup, dropoff)
-            }
-        }
-
-        // 2. Padrões textuais com prefixo (Uber e genérico)
-        val pickupPatterns = listOf(
-            Regex("""(?:embarque|buscar|retirada|origem|local\s+de\s+embarque)[:\s]+([^,\n]{3,60})""", RegexOption.IGNORE_CASE)
+        return RideOcrAddressExtractor.extractAddresses(
+            text = text,
+            routePairPattern = ROUTE_PAIR_PATTERN
         )
-        val dropoffPatterns = listOf(
-            Regex("""(?:destino|para|até|entrega|deixar|local\s+de\s+destino)[:\s]+([^,\n]{3,60})""", RegexOption.IGNORE_CASE)
-        )
-
-        var pickup = ""
-        var dropoff = ""
-
-        for (pattern in pickupPatterns) {
-            val match = pattern.find(text)
-            if (match != null) {
-                pickup = match.groupValues[1].trim()
-                break
-            }
-        }
-
-        for (pattern in dropoffPatterns) {
-            val match = pattern.find(text)
-            if (match != null) {
-                dropoff = match.groupValues[1].trim()
-                break
-            }
-        }
-
-        if (pickup.isNotBlank() && dropoff.isNotBlank()) {
-            return Pair(pickup, dropoff)
-        }
-
-        // 3. Heurística OCR: linhas que parecem endereços (contêm nomes de ruas/avenidas/etc)
-        val addressPattern = Regex(
-            """(?:R\.|Rua|Av\.|Avenida|Al\.|Alameda|Trav\.|Travessa|Pra[cç]a|Estr\.|Estrada|Rod\.|Rodovia|Lg\.|Largo)\s+[A-ZÀ-Ú][^\n]{3,60}""",
-            RegexOption.IGNORE_CASE
-        )
-        val addressMatches = addressPattern.findAll(text).map { it.value.trim() }.toList()
-        if (addressMatches.size >= 2) {
-            return Pair(addressMatches[0], addressMatches[1])
-        } else if (addressMatches.size == 1) {
-            // Só 1 endereço encontrado — usar como pickup, destino fica vazio
-            return Pair(addressMatches[0], dropoff)
-        }
-
-        return Pair(pickup, dropoff)
-    }
-
-    private fun extractBestAddressFromSegment(segment: String): String {
-        if (segment.isBlank()) return ""
-
-        val originalLines = segment
-            .lines()
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
-
-        val candidateLines = originalLines
-            .map { sanitizeAddressCandidate(it) }
-            .filter { it.length >= 4 }
-            .filterNot { isLikelyNoiseAddressLine(it) }
-
-        if (candidateLines.isNotEmpty()) {
-            val bestLine = candidateLines.maxByOrNull { line ->
-                val roadScore = if (Regex("""(?i)\b(R\.?|Rua|Av\.?|Avenida|Al\.?|Alameda|Trav\.?|Travessa|Pra[cç]a|Estr\.?|Estrada|Rod\.?|Rodovia|Vila|Setor|Residencial|Condom[ií]nio)\b""").containsMatchIn(line)) 3 else 0
-                val digitScore = if (line.any { it.isDigit() }) 1 else 0
-                val commaScore = if (line.contains(',')) 1 else 0
-                val sizeScore = line.length.coerceAtMost(60) / 20
-                roadScore + digitScore + commaScore + sizeScore
-            }.orEmpty()
-
-            if (bestLine.isNotBlank()) {
-                return bestLine
-            }
-        }
-
-        val normalized = segment
-            .replace("•", " ")
-            .replace("·", " ")
-            .replace("|", " ")
-            .replace("\n", " ")
-            .replace(Regex("\\s+"), " ")
-            .trim()
-
-        // Primeiro tentar padrão clássico de logradouro
-        val roadPattern = Regex(
-            """(?:R\\.?|Rua|Av\\.?|Avenida|Al\\.?|Alameda|Trav\\.?|Travessa|Pra[cç]a|Estr\\.?|Estrada|Rod\\.?|Rodovia)\\s+[A-ZÀ-Ú0-9][^•|]{3,120}""",
-            RegexOption.IGNORE_CASE
-        )
-        val roadMatch = roadPattern.find(normalized)?.value?.trim().orEmpty()
-        if (roadMatch.isNotBlank()) {
-            return sanitizeAddressCandidate(roadMatch)
-        }
-
-        // Fallback: pegar trecho textual significativo até palavras de corte
-        val generic = normalized
-            .replace(Regex("""(?i)\\b(aceitar|recusar|ignorar|corrida longa|perfil essencial|perfil premium|taxa de deslocamento|parada\\(s\\)|parada)\\b.*"""), "")
-            .trim()
-
-        // Evitar retornar lixo (somente números/unidades)
-        if (generic.length < 6) return ""
-        if (!generic.any { it.isLetter() }) return ""
-        if (Regex("""^\\d+[\\d,\.\\s]*$""").matches(generic)) return ""
-
-        return sanitizeAddressCandidate(generic)
-    }
-
-    private fun sanitizeAddressCandidate(input: String): String {
-        return input
-            .replace(Regex("""(?i)\b(aceitar|recusar|ignorar|corrida longa|perfil essencial|perfil premium|taxa de deslocamento|parada\(s\)|parada)\b.*"""), "")
-            .replace(Regex("\\s+"), " ")
-            .trim(' ', '-', '•', '·', ',', ';')
-    }
-
-    private fun isLikelyNoiseAddressLine(line: String): Boolean {
-        val lower = line.lowercase()
-        if (line.length <= 3) return true
-        if (!line.any { it.isLetter() }) return true
-        if (Regex("""^\d+[\d\s,\.\-/]*$""").matches(line)) return true
-
-        val uiNoiseTokens = listOf(
-            "perfil premium", "perfil essencial", "corridas", "corrida longa",
-            "taxa de deslocamento", "aceitar", "recusar", "ignorar", "soluções"
-        )
-        if (uiNoiseTokens.any { lower.contains(it) }) return true
-
-        return false
     }
 }

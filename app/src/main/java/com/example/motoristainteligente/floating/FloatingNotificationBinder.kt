@@ -1,0 +1,87 @@
+package com.example.motoristainteligente
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Intent
+import androidx.core.app.NotificationCompat
+
+fun createMainNotificationChannel(service: Service, channelId: String) {
+    val channel = NotificationChannel(
+        channelId,
+        "Motorista Inteligente",
+        NotificationManager.IMPORTANCE_LOW
+    ).apply {
+        description = "Análise de corridas em tempo real"
+    }
+
+    val manager = service.getSystemService(NotificationManager::class.java)
+    manager.createNotificationChannel(channel)
+}
+
+fun createPeakAlertsNotificationChannel(service: Service, channelId: String) {
+    val channel = NotificationChannel(
+        channelId,
+        "Alertas de Pico",
+        NotificationManager.IMPORTANCE_DEFAULT
+    ).apply {
+        description = "Alertas de pico chegando e pico diminuindo"
+    }
+
+    val manager = service.getSystemService(NotificationManager::class.java)
+    manager.createNotificationChannel(channel)
+}
+
+fun createForegroundNotification(service: Service, channelId: String, actionStop: String, contentText: String): Notification {
+    val stopIntent = Intent(service, FloatingAnalyticsService::class.java).apply {
+        action = actionStop
+    }
+    val stopPendingIntent = PendingIntent.getService(
+        service,
+        0,
+        stopIntent,
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+
+    val openIntent = Intent(service, MainActivity::class.java)
+    val openPendingIntent = PendingIntent.getActivity(
+        service,
+        0,
+        openIntent,
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+
+    return NotificationCompat.Builder(service, channelId)
+        .setContentTitle("Motorista Inteligente")
+        .setContentText(contentText)
+        .setSmallIcon(R.drawable.ic_analytics)
+        .setContentIntent(openPendingIntent)
+        .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Parar", stopPendingIntent)
+        .setOngoing(true)
+        .build()
+}
+
+fun sendPeakAlertNotification(service: Service, channelId: String, id: Int, title: String, message: String) {
+    val openIntent = Intent(service, MainActivity::class.java)
+    val openPendingIntent = PendingIntent.getActivity(
+        service,
+        id,
+        openIntent,
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+
+    val notification = NotificationCompat.Builder(service, channelId)
+        .setSmallIcon(R.drawable.ic_analytics)
+        .setContentTitle(title)
+        .setContentText(message)
+        .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+        .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+        .setAutoCancel(true)
+        .setContentIntent(openPendingIntent)
+        .build()
+
+    val manager = service.getSystemService(NotificationManager::class.java)
+    manager.notify(id, notification)
+}
