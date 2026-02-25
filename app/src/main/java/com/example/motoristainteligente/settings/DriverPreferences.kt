@@ -10,7 +10,7 @@ import com.google.firebase.auth.FirebaseAuth
  * Permite que o motorista configure:
  * - Valor mínimo por km aceitável
  * - Ganho mínimo por hora desejado
- * - Distância máxima para deslocamento vazio (ir buscar o cliente)
+ * - Distância máxima para deslocamento vazio (ir buscar o passageiro)
  * - Distância máxima da corrida (opcional)
  *
  * Os valores são persistidos em SharedPreferences e aplicados
@@ -165,7 +165,7 @@ class DriverPreferences(context: Context) {
             putScopedFloat(KEY_MIN_EARNINGS_PER_HOUR, clamped.toFloat())
         }
 
-    /** Distância máxima para ir buscar o cliente (km) */
+    /** Distância máxima para ir buscar o passageiro (km) */
     var maxPickupDistance: Double
         get() = getScopedFloat(KEY_MAX_PICKUP_DISTANCE, DEFAULT_MAX_PICKUP_DISTANCE.toFloat()).toDouble()
         set(value) {

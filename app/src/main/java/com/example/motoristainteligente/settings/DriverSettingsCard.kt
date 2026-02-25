@@ -107,7 +107,7 @@ fun DriverSettingsCard(
             Spacer(modifier = Modifier.height(12.dp))
 
             SettingSlider(
-                label = "Distância máx. para buscar cliente",
+                label = "Distância máx. para buscar passageiro",
                 value = maxPickupDistance,
                 valueText = String.format("%.1f km", maxPickupDistance),
                 min = DriverPreferences.MAX_PICKUP_FLOOR.toFloat(),

@@ -2,6 +2,8 @@ package com.example.motoristainteligente
 
 object RideOcrAddressExtractor {
 
+    private const val STREET_PREFIX_REGEX = "(?:R(?:ua)?\\.?|Av(?:enida)?\\.?|Blvd\\.?|Boulevard|Estr\\.?|Estrada|Viela|Tv\\.?|Travessa|Al\\.?|Alameda|Pç\\.?|Praça)"
+
     private val pickupPatterns = listOf(
         Regex("""(?:embarque|buscar|retirada|origem|local\s+de\s+embarque)[:\s]+([^,\n]{3,60})""", RegexOption.IGNORE_CASE)
     )
@@ -9,11 +11,11 @@ object RideOcrAddressExtractor {
         Regex("""(?:destino|para|até|entrega|deixar|local\s+de\s+destino)[:\s]+([^,\n]{3,60})""", RegexOption.IGNORE_CASE)
     )
     private val addressPattern = Regex(
-        """(?:R(?:ua)?\.?|Av(?:enida)?\.?|M(?:arginal)?\.?)\s+[A-ZÀ-Ú0-9][^\n]{3,60}""",
+        """$STREET_PREFIX_REGEX\s+[A-ZÀ-Ú0-9][^\n]{3,60}""",
         RegexOption.IGNORE_CASE
     )
     private val roadPattern = Regex(
-        """(?:R(?:ua)?\.?|Av(?:enida)?\.?|M(?:arginal)?\.?)\s+[A-ZÀ-Ú0-9][^•|]{3,120}""",
+        """$STREET_PREFIX_REGEX\s+[A-ZÀ-Ú0-9][^•|]{3,120}""",
         RegexOption.IGNORE_CASE
     )
 
@@ -133,7 +135,7 @@ object RideOcrAddressExtractor {
 
     private fun isValidAddressPrefix(value: String): Boolean {
         val trimmed = value.trimStart()
-        return Regex("""^(?i)(R(?:ua)?\.?|Av(?:enida)?\.?|M(?:arginal)?\.?)\s+.+""").containsMatchIn(trimmed)
+        return Regex("""^(?i)$STREET_PREFIX_REGEX\s+.+""").containsMatchIn(trimmed)
     }
 
     private fun sanitizeAddressCandidate(input: String): String {
@@ -144,6 +146,37 @@ object RideOcrAddressExtractor {
             )
             .replace(Regex("\\s+"), " ")
             .trim(' ', '-', '•', '·', ',', ';')
+            .let { normalizeAddressPrefix(it) }
+    }
+
+    private fun normalizeAddressPrefix(value: String): String {
+        if (value.isBlank()) return value
+
+        val cleaned = value.trimStart()
+
+        val normalized = cleaned
+            .replaceFirst(Regex("""(?i)^rua\b\s*"""), "R. ")
+            .replaceFirst(Regex("""(?i)^r\.?\b\s*"""), "R. ")
+            .replaceFirst(Regex("""(?i)^avenida\b\s*"""), "Av. ")
+            .replaceFirst(Regex("""(?i)^av\.?\b\s*"""), "Av. ")
+            .replaceFirst(Regex("""(?i)^boulevard\b\s*"""), "Blvd. ")
+            .replaceFirst(Regex("""(?i)^blvd\.?\b\s*"""), "Blvd. ")
+            .replaceFirst(Regex("""(?i)^estrada\b\s*"""), "Estr. ")
+            .replaceFirst(Regex("""(?i)^estr\.?\b\s*"""), "Estr. ")
+            .replaceFirst(Regex("""(?i)^travessa\b\s*"""), "Tv. ")
+            .replaceFirst(Regex("""(?i)^tv\.?\b\s*"""), "Tv. ")
+            .replaceFirst(Regex("""(?i)^alameda\b\s*"""), "Al. ")
+            .replaceFirst(Regex("""(?i)^al\.?\b\s*"""), "Al. ")
+            .replaceFirst(Regex("""(?i)^praça\b\s*"""), "Pç. ")
+            .replaceFirst(Regex("""(?i)^pç\.?\b\s*"""), "Pç. ")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+
+        return if (normalized.startsWith("Viela", ignoreCase = true)) {
+            "Viela " + normalized.replaceFirst(Regex("""(?i)^viela\b\s*"""), "").trimStart()
+        } else {
+            normalized
+        }
     }
 
     private fun isLikelyNoiseAddressLine(line: String): Boolean {

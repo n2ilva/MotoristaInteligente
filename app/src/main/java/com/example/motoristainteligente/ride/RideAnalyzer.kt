@@ -53,12 +53,16 @@ object RideAnalyzer {
             Recommendation.NOT_WORTH_IT
         }
 
+        val exceedsPickupLimit = pickupDistanceKm > maxPickupDistanceKm
+        val exceedsRideDistanceLimit = rideData.distanceKm > maxRideDistanceKm
+
         // Motivos
         val reasons = buildReasons(
-            pricePerKm, effectivePricePerKm,
-            earningsPerHour, pickupDistanceKm, adjustedReference,
-            exceedsPickup = false,
-            exceedsRideDistance = false
+            effectivePricePerKm = effectivePricePerKm,
+            earningsPerHour = earningsPerHour,
+            reference = adjustedReference,
+            exceedsPickup = exceedsPickupLimit,
+            exceedsRideDistance = exceedsRideDistanceLimit
         )
 
         return RideAnalysis(
@@ -85,50 +89,32 @@ object RideAnalyzer {
     }
 
     private fun buildReasons(
-        pricePerKm: Double,
         effectivePricePerKm: Double,
         earningsPerHour: Double,
-        pickupDistanceKm: Double,
         reference: Double,
         exceedsPickup: Boolean = false,
         exceedsRideDistance: Boolean = false
     ): List<String> {
         val reasons = mutableListOf<String>()
 
+        if (earningsPerHour < minEarningsPerHour) {
+            reasons.add("R$/h abaixo do mínimo")
+        }
+
         if (exceedsPickup) {
-            reasons.add("⛔ Deslocamento excede seu limite (${String.format("%.1f", maxPickupDistanceKm)}km)")
+            reasons.add("Passageiro muito longe")
         }
+
         if (exceedsRideDistance) {
-            reasons.add("⛔ Corrida excede distância máxima (${String.format("%.0f", maxRideDistanceKm)}km)")
+            reasons.add("Corrida longa demais")
         }
 
-        if (effectivePricePerKm >= reference * 1.2) {
-            reasons.add("Preço/km acima da média")
-        } else if (effectivePricePerKm < reference * 0.8) {
-            reasons.add("Preço/km abaixo da média")
-        }
-
-        if (earningsPerHour >= minEarningsPerHour * 1.3) {
-            reasons.add("Boa rentabilidade por hora")
-        } else if (earningsPerHour < minEarningsPerHour * 0.7) {
-            reasons.add("Baixa rentabilidade por hora")
-        }
-
-        if (pickupDistanceKm > maxPickupDistanceKm) {
-            reasons.add("Embarque muito distante (${String.format("%.1f", pickupDistanceKm)}km)")
-        } else if (pickupDistanceKm <= 1.5) {
-            reasons.add("Embarque próximo")
-        }
-
-        val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
-        if (hour in 17..20 || hour in 7..9) {
-            reasons.add("Horário de pico")
-        } else if (hour in 22..23 || hour in 0..5) {
-            reasons.add("Horário noturno")
+        if (effectivePricePerKm < reference) {
+            reasons.add("R$/km abaixo do mínimo")
         }
 
         if (reasons.isEmpty()) {
-            reasons.add("Corrida dentro da média")
+            reasons.add("Dentro dos seus parâmetros")
         }
 
         return reasons

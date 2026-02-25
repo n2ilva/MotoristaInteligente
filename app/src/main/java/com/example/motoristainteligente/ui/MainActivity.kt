@@ -2546,7 +2546,7 @@ fun DemandMonitorCard(
 
             Text(
                   text = if (!isGoogleLoggedIn) "Faça login com Google para visualizar demanda"
-                      else if (hasFirebaseData) "Análise 100% Firebase (ofertas do dia)"
+                      else if (hasFirebaseData) "Análise da plataforma (ofertas do dia)"
                       else if (firebaseStats.loaded) "Sem ofertas na plataforma hoje"
                       else "Carregando dados da base...",
                 fontSize = 12.sp,

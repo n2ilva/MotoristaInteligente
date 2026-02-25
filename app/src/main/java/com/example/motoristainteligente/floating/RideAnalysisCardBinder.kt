@@ -48,8 +48,16 @@ fun bindRideAnalysisCard(
 
     val tvPickup = card.findViewById<TextView>(R.id.tvPickupAddress)
     val tvDropoff = card.findViewById<TextView>(R.id.tvDropoffAddress)
+    val tvQuickInsights = card.findViewById<TextView>(R.id.tvQuickInsights)
     tvPickup.text = analysis.rideData.pickupAddress.ifBlank { "Endereço não extraído" }
     tvDropoff.text = analysis.rideData.dropoffAddress.ifBlank { "Endereço não extraído" }
+    tvQuickInsights.text = analysis.reasons.take(3).joinToString(" • ")
+
+    val isWithinParameters = analysis.reasons.size == 1 &&
+        analysis.reasons.first().equals("Dentro dos seus parâmetros", ignoreCase = true)
+    tvQuickInsights.setTextColor(
+        if (isWithinParameters) 0xFF4CAF50.toInt() else 0xFFF44336.toInt()
+    )
 
     card.findViewById<View>(R.id.btnClose).setOnClickListener {
         onClose()
