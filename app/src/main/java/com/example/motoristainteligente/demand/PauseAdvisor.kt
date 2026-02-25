@@ -36,6 +36,15 @@ object PauseAdvisor {
         val minutesToNextPeak: Int?
     )
 
+    data class CityPeakWindowSignal(
+        val supportedCity: Boolean,
+        val inPeakNow: Boolean,
+        val currentOrLastStart: String,
+        val currentOrLastEnd: String,
+        val nextStart: String,
+        val nextEnd: String
+    )
+
     private data class PeakWindow(
         val startMin: Int,
         val endMin: Int,
@@ -128,15 +137,15 @@ object PauseAdvisor {
         when {
             sessionMin > 360 -> { // +6h
                 pauseScore += 40
-                reasons.add("🛑 Você está rodando há ${sessionMin / 60}h! Descanse")
+                reasons.add("Você está rodando há ${sessionMin / 60}h! Descanse")
             }
             sessionMin > 240 -> { // +4h
                 pauseScore += 25
-                reasons.add("⚠️ ${sessionMin / 60}h+ de sessão — fadiga aumenta risco")
+                reasons.add("${sessionMin / 60}h+ de sessão — fadiga aumenta risco")
             }
             sessionMin > 120 -> { // +2h
                 pauseScore += 10
-                reasons.add("🕐 ${sessionMin / 60}h de sessão")
+                reasons.add("${sessionMin / 60}h de sessão")
             }
         }
 
@@ -144,18 +153,18 @@ object PauseAdvisor {
         when (demandStats.demandLevel) {
             DemandTracker.DemandLevel.LOW -> {
                 pauseScore += 20
-                reasons.add("❄️ Demanda baixa — poucas corridas chegando")
+                reasons.add("Demanda baixa — poucas corridas chegando")
             }
             DemandTracker.DemandLevel.UNKNOWN -> {
                 pauseScore += 15
-                reasons.add("❓ Sem corridas recentes — demanda incerta")
+                reasons.add("Sem corridas recentes — demanda incerta")
             }
             DemandTracker.DemandLevel.MEDIUM -> {
                 pauseScore += 5
             }
             DemandTracker.DemandLevel.HIGH -> {
                 pauseScore -= 15
-                reasons.add("🔥 Demanda alta — bom momento para continuar")
+                reasons.add("Demanda alta — bom momento para continuar")
             }
         }
 
@@ -163,11 +172,11 @@ object PauseAdvisor {
         when (demandStats.trend) {
             DemandTracker.DemandTrend.FALLING -> {
                 pauseScore += 15
-                reasons.add("📉 Demanda caindo — pode piorar")
+                reasons.add("Demanda caindo — pode piorar")
             }
             DemandTracker.DemandTrend.RISING -> {
                 pauseScore -= 10
-                reasons.add("📈 Demanda subindo — momento favorável")
+                reasons.add("Demanda subindo — momento favorável")
             }
             DemandTracker.DemandTrend.STABLE -> { /* neutro */ }
         }
@@ -176,11 +185,11 @@ object PauseAdvisor {
         when (demandStats.priceTrend) {
             DemandTracker.PriceTrend.DECREASING -> {
                 pauseScore += 15
-                reasons.add("🔻 Preços caindo — corridas menos rentáveis")
+                reasons.add("Preços caindo — corridas menos rentáveis")
             }
             DemandTracker.PriceTrend.INCREASING -> {
                 pauseScore -= 10
-                reasons.add("💹 Preços subindo — boa rentabilidade")
+                reasons.add("Preços subindo — boa rentabilidade")
             }
             DemandTracker.PriceTrend.STABLE -> { /* neutro */ }
         }
@@ -189,25 +198,25 @@ object PauseAdvisor {
         val nextPeakInfo = getNextPeakInfo(hour)
         if (currentMarket.demandIndex < 0.3) {
             pauseScore += 15
-            reasons.add("📊 Horário de baixa demanda na sua região")
+            reasons.add("Horário de baixa demanda na sua região")
         } else if (currentMarket.demandIndex > 0.7) {
             pauseScore -= 15
-            reasons.add("📊 Horário de alta demanda — aproveite!")
+            reasons.add("Horário de alta demanda — aproveite!")
         }
 
         if (currentMarket.surgeMultiplier > 1.3) {
             pauseScore -= 20
-            reasons.add("💰 Surge ${String.format("%.1fx", currentMarket.surgeMultiplier)} ativo!")
+            reasons.add("Surge ${String.format("%.1fx", currentMarket.surgeMultiplier)} ativo!")
         }
 
         // ========== 6. GANHO DA SESSÃO ==========
         if (demandStats.sessionAvgEarningsPerHour > 0 && sessionMin > 30) {
             if (demandStats.sessionAvgEarningsPerHour < 15) {
                 pauseScore += 15
-                reasons.add("💸 Ganho médio baixo: R$ ${String.format("%.0f", demandStats.sessionAvgEarningsPerHour)}/h")
+                reasons.add("Ganho médio baixo: R$ ${String.format("%.0f", demandStats.sessionAvgEarningsPerHour)}/h")
             } else if (demandStats.sessionAvgEarningsPerHour > 35) {
                 pauseScore -= 10
-                reasons.add("💵 Ótimo ganho: R$ ${String.format("%.0f", demandStats.sessionAvgEarningsPerHour)}/h")
+                reasons.add("Ótimo ganho: R$ ${String.format("%.0f", demandStats.sessionAvgEarningsPerHour)}/h")
             }
         }
 
@@ -370,6 +379,41 @@ object PauseAdvisor {
         )
     }
 
+    fun getCityPeakWindowSignal(
+        cityName: String?,
+        hour: Int,
+        minute: Int,
+        dayOfWeek: Int
+    ): CityPeakWindowSignal {
+        val context = buildCityPeakContext(cityName, hour, minute, dayOfWeek)
+        if (context == null || context.windows.isEmpty()) {
+            return CityPeakWindowSignal(
+                supportedCity = false,
+                inPeakNow = false,
+                currentOrLastStart = "—",
+                currentOrLastEnd = "—",
+                nextStart = "—",
+                nextEnd = "—"
+            )
+        }
+
+        val minuteOfDay = context.minuteOfDay
+        val active = context.activeWindow
+        val last = context.windows.lastOrNull { it.endMin < minuteOfDay }
+        val currentOrLast = active ?: last ?: context.windows.lastOrNull() ?: context.windows.first()
+
+        val next = context.nextWindow ?: context.windows.first()
+
+        return CityPeakWindowSignal(
+            supportedCity = true,
+            inPeakNow = active != null,
+            currentOrLastStart = formatMinuteOfDay(currentOrLast.startMin),
+            currentOrLastEnd = formatMinuteOfDay(currentOrLast.endMin),
+            nextStart = formatMinuteOfDay(next.startMin),
+            nextEnd = formatMinuteOfDay(next.endMin)
+        )
+    }
+
     private fun buildCityPeakContext(
         cityName: String?,
         hour: Int,
@@ -409,6 +453,13 @@ object PauseAdvisor {
     }
 
     private fun h(hour: Int, minute: Int): Int = hour * 60 + minute
+
+    private fun formatMinuteOfDay(minuteOfDay: Int): String {
+        val normalized = ((minuteOfDay % 1440) + 1440) % 1440
+        val hour = normalized / 60
+        val minute = normalized % 60
+        return String.format("%02d:%02d", hour, minute)
+    }
 
     private fun getGoiasPeakProfiles(): List<CityPeakProfile> {
         return listOf(

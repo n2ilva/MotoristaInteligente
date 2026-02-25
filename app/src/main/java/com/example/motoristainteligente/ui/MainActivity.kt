@@ -76,6 +76,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -126,6 +128,7 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.GoogleAuthProvider
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.util.Calendar
 import java.util.Locale
 
 // ===============================================
@@ -192,32 +195,59 @@ class MainActivity : ComponentActivity() {
                 var isServiceRunning by remember {
                     mutableStateOf(FloatingAnalyticsService.instance != null)
                 }
+                var isAnalysisPaused by remember {
+                    mutableStateOf(AnalysisServiceState.isPaused(this@MainActivity))
+                }
+                var lifecycleRefreshTick by remember { mutableStateOf(0) }
 
                 val lifecycleOwner = LocalLifecycleOwner.current
                 DisposableEffect(lifecycleOwner) {
                     val observer = LifecycleEventObserver { _, event ->
                         if (event == Lifecycle.Event.ON_RESUME) {
                             isServiceRunning = FloatingAnalyticsService.instance != null
+                            isAnalysisPaused = AnalysisServiceState.isPaused(this@MainActivity)
+                            lifecycleRefreshTick++
                         }
                     }
                     lifecycleOwner.lifecycle.addObserver(observer)
                     onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
                 }
 
+                LaunchedEffect(Unit) {
+                    while (true) {
+                        val pausedNow = AnalysisServiceState.isPaused(this@MainActivity)
+                        if (pausedNow != isAnalysisPaused) {
+                            isAnalysisPaused = pausedNow
+                        }
+                        delay(350)
+                    }
+                }
+
                 AppWithDrawer(
                     isServiceRunning = isServiceRunning,
+                    isAnalysisPaused = isAnalysisPaused,
+                    refreshTick = lifecycleRefreshTick,
                     onRequestOverlayPermission = { requestOverlayPermission() },
                     onOpenAccessibilitySettings = { openAccessibilitySettings() },
                     onRequestLocationPermission = { requestLocationPermission() },
                     onStartService = {
                         startFloatingService()
+                        AnalysisServiceState.setPaused(this@MainActivity, false)
+                        isAnalysisPaused = false
                         Handler(Looper.getMainLooper()).postDelayed({
                             isServiceRunning = FloatingAnalyticsService.instance != null
                         }, 800)
                     },
                     onStopService = {
                         stopFloatingService()
+                        AnalysisServiceState.setPaused(this@MainActivity, false)
                         isServiceRunning = false
+                        isAnalysisPaused = false
+                    },
+                    onTogglePause = {
+                        val next = !AnalysisServiceState.isPaused(this@MainActivity)
+                        AnalysisServiceState.setPaused(this@MainActivity, next)
+                        isAnalysisPaused = next
                     }
                 )
             }
@@ -298,11 +328,14 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun AppWithDrawer(
     isServiceRunning: Boolean,
+    isAnalysisPaused: Boolean,
+    refreshTick: Int,
     onRequestOverlayPermission: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
     onRequestLocationPermission: () -> Unit,
     onStartService: () -> Unit,
-    onStopService: () -> Unit
+    onStopService: () -> Unit,
+    onTogglePause: () -> Unit
 ) {
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -380,8 +413,10 @@ fun AppWithDrawer(
                 when (currentScreen) {
                     Screen.HOME -> HomeScreen(
                         isServiceRunning = isServiceRunning,
+                        isAnalysisPaused = isAnalysisPaused,
                         onStartService = onStartService,
                         onStopService = onStopService,
+                        onTogglePause = onTogglePause,
                         onNavigateToPermissions = { currentScreen = Screen.PERMISSIONS },
                         firestoreManager = firestoreManager
                     )
@@ -393,6 +428,7 @@ fun AppWithDrawer(
                     )
                     Screen.WEEKLY_COMPARISON -> WeeklyComparisonScreen()
                     Screen.PERMISSIONS -> PermissionsScreen(
+                        refreshTick = refreshTick,
                         onRequestOverlayPermission = onRequestOverlayPermission,
                         onOpenAccessibilitySettings = onOpenAccessibilitySettings,
                         onRequestLocationPermission = onRequestLocationPermission
@@ -400,7 +436,8 @@ fun AppWithDrawer(
                     Screen.TIPS -> TipsScreen()
                     Screen.LOGIN -> LoginScreen(
                         firestoreManager = firestoreManager,
-                        onLoginSuccess = { authRefresh++ }
+                        onLoginSuccess = { authRefresh++ },
+                        onLogoutSuccess = { authRefresh++ }
                     )
                 }
             }
@@ -529,7 +566,13 @@ fun DrawerMenuItem(
     onScreenSelected: (Screen) -> Unit
 ) {
     NavigationDrawerItem(
-        icon = { Icon(screen.icon, contentDescription = screen.title) },
+        icon = {
+            Image(
+                painter = painterResource(id = R.drawable.logo),
+                contentDescription = screen.title,
+                modifier = Modifier.size(20.dp)
+            )
+        },
         label = { Text(screen.title) },
         selected = currentScreen == screen,
         onClick = { onScreenSelected(screen) },
@@ -543,8 +586,10 @@ fun DrawerMenuItem(
 @Composable
 fun HomeScreen(
     isServiceRunning: Boolean,
+    isAnalysisPaused: Boolean,
     onStartService: () -> Unit,
     onStopService: () -> Unit,
+    onTogglePause: () -> Unit,
     onNavigateToPermissions: () -> Unit = {},
     firestoreManager: FirestoreManager? = null
 ) {
@@ -768,6 +813,25 @@ fun HomeScreen(
                         StatusIndicatorRow("Acessibilidade", isAccessibilityActive)
                         StatusIndicatorRow("Localização", isLocationActive)
                         StatusIndicatorRow("Sobreposição de Tela", isOverlayActive)
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Button(
+                        onClick = onTogglePause,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(46.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isAnalysisPaused) Color(0xFF757575) else Color(0xFF4CAF50)
+                        ),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text(
+                            text = if (isAnalysisPaused) "Ativar análise" else "Pausar análise",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
 
                 }
@@ -1019,9 +1083,36 @@ fun RideSettingsScreen(
 @Composable
 fun WeeklyComparisonScreen() {
     val context = LocalContext.current
-    val historyManager = remember { RideHistoryManager(context) }
-    val weekSummary = remember { historyManager.getWeekSummary() }
-    val dailySummaries = remember { historyManager.getDailySummariesLast7Days() }
+    val firestoreManager = remember { FirestoreManager(context) }
+
+    var isLoading by remember { mutableStateOf(true) }
+    var weeklyData by remember { mutableStateOf<List<FirestoreManager.WeeklyPlatformDayAnalytics>>(emptyList()) }
+
+    LaunchedEffect(Unit) {
+        firestoreManager.loadCurrentWeekDailyAnalytics { result ->
+            weeklyData = result
+            isLoading = false
+        }
+    }
+
+    val uberRows = weeklyData.map {
+        WeeklyPlatformRow(
+            dateKey = it.dateKey,
+            dayOfWeek = it.dayOfWeek,
+            offers = it.offersUber,
+            avgPrice = it.avgPriceUber,
+            avgPricePerKm = it.avgPricePerKmUber
+        )
+    }
+    val ninetyNineRows = weeklyData.map {
+        WeeklyPlatformRow(
+            dateKey = it.dateKey,
+            dayOfWeek = it.dayOfWeek,
+            offers = it.offers99,
+            avgPrice = it.avgPrice99,
+            avgPricePerKm = it.avgPricePerKm99
+        )
+    }
 
     Column(
         modifier = Modifier
@@ -1029,122 +1120,361 @@ fun WeeklyComparisonScreen() {
             .padding(24.dp)
             .verticalScroll(rememberScrollState())
     ) {
-        if (weekSummary.totalRides == 0) {
+        Text(
+            text = "Resumo Semanal (Domingo a Sábado)",
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Bold
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            text = "Visão geral da semana atual com opção de comparar qualquer dia.",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        if (isLoading) {
+            EmptyStateCard(
+                emoji = "⏳",
+                title = "Carregando resumo semanal",
+                subtitle = "Buscando resultados salvos no Firebase..."
+            )
+        } else if (weeklyData.isEmpty()) {
             EmptyStateCard(
                 emoji = "📅",
                 title = "Sem dados da semana",
-                subtitle = "Aceite corridas para ver o resumo dos últimos 7 dias."
+                subtitle = "Assim que os dados forem salvos no Firebase, o resumo aparecerá aqui."
             )
         } else {
-            // Cards diários
-            Text(
-                text = "📋 Resumo por Dia",
-                fontSize = 18.sp,
-                fontWeight = FontWeight.SemiBold
-            )
+            WeeklyGeneralSummaryCard(weeklyData = weeklyData)
+
             Spacer(modifier = Modifier.height(12.dp))
 
-            dailySummaries.forEach { (dayName, dateBR, daySummary) ->
-                DaySummaryCard(
-                    dayName = dayName,
-                    dateBR = dateBR,
-                    summary = daySummary
-                )
-                Spacer(modifier = Modifier.height(8.dp))
+            WeeklyPlatformCard(
+                title = "Uber",
+                backgroundColor = Color(0xFF0D1B3D).copy(alpha = 0.12f),
+                accentColor = Color(0xFF0D1B3D),
+                rows = uberRows
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            WeeklyPlatformCard(
+                title = "99",
+                backgroundColor = Color(0xFFFFEB3B).copy(alpha = 0.22f),
+                accentColor = Color(0xFFFF6F00),
+                rows = ninetyNineRows
+            )
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun WeeklyGeneralSummaryCard(
+    weeklyData: List<FirestoreManager.WeeklyPlatformDayAnalytics>
+) {
+    val totalOffers = weeklyData.sumOf { it.totalOffers }
+    val totalUber = weeklyData.sumOf { it.offersUber }
+    val total99 = weeklyData.sumOf { it.offers99 }
+
+    val avgDailyOffers = if (weeklyData.isNotEmpty()) {
+        totalOffers.toDouble() / weeklyData.size
+    } else 0.0
+
+    fun averageNonZero(values: List<Double>): Double {
+        val filtered = values.filter { it > 0.0 }
+        return if (filtered.isNotEmpty()) filtered.average() else 0.0
+    }
+
+    val avgUberPrice = averageNonZero(weeklyData.map { it.avgPriceUber })
+    val avg99Price = averageNonZero(weeklyData.map { it.avgPrice99 })
+    val avgUberPerKm = averageNonZero(weeklyData.map { it.avgPricePerKmUber })
+    val avg99PerKm = averageNonZero(weeklyData.map { it.avgPricePerKm99 })
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF7B1FA2).copy(alpha = 0.10f)),
+        shape = RoundedCornerShape(14.dp)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = "Análise geral (7 dias)",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF7B1FA2)
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                StatItem("Total ofertas", "$totalOffers")
+                StatItem("Uber", "$totalUber")
+                StatItem("99", "$total99")
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
-            // Card resumo da semana
-            Card(
+            Row(
                 modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = Color(0xFF7B1FA2).copy(alpha = 0.10f)
-                ),
-                shape = RoundedCornerShape(16.dp)
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Column(modifier = Modifier.padding(20.dp)) {
-                    Text(
-                        text = "📅 Resumo da Semana",
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF7B1FA2)
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
+                StatItem("Média/dia", String.format("%.1f", avgDailyOffers))
+                StatItem("Méd Uber", if (avgUberPrice > 0) String.format("R$ %.2f", avgUberPrice) else "—")
+                StatItem("Méd 99", if (avg99Price > 0) String.format("R$ %.2f", avg99Price) else "—")
+            }
 
-                    Text(
-                        text = String.format("R$ %.2f", weekSummary.totalEarnings),
-                        fontSize = 34.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF7B1FA2)
-                    )
-                    Text(
-                        text = "ganhos em 7 dias",
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                    )
+            Spacer(modifier = Modifier.height(10.dp))
 
-                    Spacer(modifier = Modifier.height(16.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                StatItem("R$/km Uber", if (avgUberPerKm > 0) String.format("%.2f", avgUberPerKm) else "—")
+                StatItem("R$/km 99", if (avg99PerKm > 0) String.format("%.2f", avg99PerKm) else "—")
+                StatItem("Semana", "Dom-Sáb")
+            }
+        }
+    }
+}
+
+private data class WeeklyPlatformRow(
+    val dateKey: String,
+    val dayOfWeek: Int,
+    val offers: Int,
+    val avgPrice: Double,
+    val avgPricePerKm: Double
+)
+
+private data class TrendIndicatorUi(
+    val emoji: String,
+    val color: Color
+)
+
+private fun resolveTrendIndicator(current: Double, previous: Double?): TrendIndicatorUi {
+    if (previous == null || previous <= 0.0 || current <= 0.0) {
+        return TrendIndicatorUi("➖", Color(0xFF757575))
+    }
+
+    return when {
+        current < previous -> TrendIndicatorUi("📉", Color(0xFFF44336))
+        current > previous -> TrendIndicatorUi("📈", Color(0xFF2E7D32))
+        else -> TrendIndicatorUi("➡️", Color(0xFFFF9800))
+    }
+}
+
+private fun formatDayLabel(dayOfWeek: Int): String = when (dayOfWeek) {
+    Calendar.SUNDAY -> "Dom"
+    Calendar.MONDAY -> "Seg"
+    Calendar.TUESDAY -> "Ter"
+    Calendar.WEDNESDAY -> "Qua"
+    Calendar.THURSDAY -> "Qui"
+    Calendar.FRIDAY -> "Sex"
+    Calendar.SATURDAY -> "Sáb"
+    else -> "Dia"
+}
+
+private fun formatDateKeyToBr(dateKey: String): String {
+    val parts = dateKey.split("-")
+    return if (parts.size == 3) "${parts[2]}/${parts[1]}" else dateKey
+}
+
+@Composable
+private fun WeeklyPlatformCard(
+    title: String,
+    backgroundColor: Color,
+    accentColor: Color,
+    rows: List<WeeklyPlatformRow>
+) {
+    var compareAKey by remember(rows) { mutableStateOf(rows.lastOrNull()?.dateKey) }
+    var compareBKey by remember(rows) {
+        mutableStateOf(
+            rows.dropLast(1).lastOrNull()?.dateKey
+                ?: rows.lastOrNull()?.dateKey
+        )
+    }
+
+    val compareA = rows.firstOrNull { it.dateKey == compareAKey }
+    val compareB = rows.firstOrNull { it.dateKey == compareBKey }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = backgroundColor),
+        shape = RoundedCornerShape(14.dp)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = title,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = accentColor
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            if (rows.isEmpty()) {
+                Text(
+                    text = "Sem dados na semana.",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+            } else {
+                rows.forEachIndexed { index, row ->
+                    val prev = rows.getOrNull(index - 1)
+                    val avgTrend = resolveTrendIndicator(row.avgPrice, prev?.avgPrice)
+                    val avgPerKmTrend = resolveTrendIndicator(row.avgPricePerKm, prev?.avgPricePerKm)
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        StatItem("Corridas", "${weekSummary.totalRides}")
-                        StatItem("Km total", String.format("%.1f", weekSummary.totalDistanceKm))
-                        StatItem("Tempo", "${weekSummary.totalTimeMin} min")
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        StatItem("R$/km", String.format("%.2f", weekSummary.avgPricePerKm))
-                        StatItem("R$/hora", String.format("%.0f", weekSummary.avgEarningsPerHour))
-                        StatItem("Média/corrida", String.format("R$ %.0f", weekSummary.avgRidePrice))
-                    }
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    // Melhor e pior corrida da semana
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        HighlightCard(
-                            modifier = Modifier.weight(1f),
-                            label = "Melhor corrida",
-                            value = String.format("R$ %.2f", weekSummary.bestRidePrice),
-                            color = Color(0xFF4CAF50)
-                        )
-                        HighlightCard(
-                            modifier = Modifier.weight(1f),
-                            label = "Pior corrida",
-                            value = String.format("R$ %.2f", weekSummary.worstRidePrice),
-                            color = Color(0xFFF44336)
-                        )
-                    }
-
-                    // Melhor dia da semana
-                    val bestDay = dailySummaries
-                        .filter { it.third.totalRides > 0 }
-                        .maxByOrNull { it.third.totalEarnings }
-                    if (bestDay != null) {
-                        Spacer(modifier = Modifier.height(12.dp))
                         Text(
-                            text = "⭐ Melhor dia: ${bestDay.first} (${bestDay.second}) — R$ ${String.format("%.2f", bestDay.third.totalEarnings)}",
+                            text = "${formatDayLabel(row.dayOfWeek)} ${formatDateKeyToBr(row.dateKey)}",
                             fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = Color(0xFF4CAF50)
+                            fontWeight = FontWeight.SemiBold
+                        )
+
+                        Text(
+                            text = "${row.offers} ofertas",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(2.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "${avgTrend.emoji} Média: ${if (row.avgPrice > 0) String.format("R$ %.2f", row.avgPrice) else "—"}",
+                            fontSize = 12.sp,
+                            color = avgTrend.color
+                        )
+                        Text(
+                            text = "${avgPerKmTrend.emoji} R$/km: ${if (row.avgPricePerKm > 0) String.format("%.2f", row.avgPricePerKm) else "—"}",
+                            fontSize = 12.sp,
+                            color = avgPerKmTrend.color
+                        )
+                    }
+
+                    if (index < rows.lastIndex) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f))
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                }
+
+                if (rows.size >= 2) {
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Text(
+                        text = "Comparar dias",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        DayPickerDropdown(
+                            modifier = Modifier.weight(1f),
+                            label = "Dia A",
+                            options = rows,
+                            selectedKey = compareAKey,
+                            onSelect = { compareAKey = it }
+                        )
+                        DayPickerDropdown(
+                            modifier = Modifier.weight(1f),
+                            label = "Dia B",
+                            options = rows,
+                            selectedKey = compareBKey,
+                            onSelect = { compareBKey = it }
+                        )
+                    }
+
+                    if (compareA != null && compareB != null) {
+                        val diffOffers = compareA.offers - compareB.offers
+                        val diffAvgPrice = compareA.avgPrice - compareB.avgPrice
+                        val diffAvgPerKm = compareA.avgPricePerKm - compareB.avgPricePerKm
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "A (${formatDayLabel(compareA.dayOfWeek)} ${formatDateKeyToBr(compareA.dateKey)}) vs B (${formatDayLabel(compareB.dayOfWeek)} ${formatDateKeyToBr(compareB.dateKey)})",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                        Text(
+                            text = "Ofertas: ${if (diffOffers >= 0) "+" else ""}$diffOffers",
+                            fontSize = 12.sp,
+                            color = if (diffOffers < 0) Color(0xFFF44336) else Color(0xFF2E7D32)
+                        )
+                        Text(
+                            text = "Média: ${if (diffAvgPrice >= 0) "+" else ""}${String.format("R$ %.2f", diffAvgPrice)}",
+                            fontSize = 12.sp,
+                            color = if (diffAvgPrice < 0) Color(0xFFF44336) else Color(0xFF2E7D32)
+                        )
+                        Text(
+                            text = "R$/km: ${if (diffAvgPerKm >= 0) "+" else ""}${String.format("%.2f", diffAvgPerKm)}",
+                            fontSize = 12.sp,
+                            color = if (diffAvgPerKm < 0) Color(0xFFF44336) else Color(0xFF2E7D32)
                         )
                     }
                 }
             }
         }
+    }
+}
 
-        Spacer(modifier = Modifier.height(24.dp))
+@Composable
+private fun DayPickerDropdown(
+    modifier: Modifier = Modifier,
+    label: String,
+    options: List<WeeklyPlatformRow>,
+    selectedKey: String?,
+    onSelect: (String) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selected = options.firstOrNull { it.dateKey == selectedKey } ?: options.lastOrNull()
+
+    Box(modifier = modifier) {
+        OutlinedButton(
+            onClick = { expanded = true },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                text = if (selected != null)
+                    "$label: ${formatDayLabel(selected.dayOfWeek)} ${formatDateKeyToBr(selected.dateKey)}"
+                else
+                    "$label: —",
+                fontSize = 12.sp
+            )
+        }
+
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false }
+        ) {
+            options.forEach { option ->
+                DropdownMenuItem(
+                    text = {
+                        Text("${formatDayLabel(option.dayOfWeek)} ${formatDateKeyToBr(option.dateKey)}")
+                    },
+                    onClick = {
+                        onSelect(option.dateKey)
+                        expanded = false
+                    }
+                )
+            }
+        }
     }
 }
 
@@ -1234,6 +1564,15 @@ fun DemandByRegionScreen(firestoreManager: FirestoreManager?) {
     var selectedCity by remember { mutableStateOf<String?>(null) }
     var isLoading by remember { mutableStateOf(true) }
     var expandedCityCard by remember { mutableStateOf<String?>(null) }
+    var lastRefreshAt by remember { mutableStateOf(0L) }
+    var nowTick by remember { mutableStateOf(System.currentTimeMillis()) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            nowTick = System.currentTimeMillis()
+            delay(1000)
+        }
+    }
 
     LaunchedEffect(Unit) {
         if (firestoreManager == null) {
@@ -1247,10 +1586,11 @@ fun DemandByRegionScreen(firestoreManager: FirestoreManager?) {
                 firestoreManager.loadCityDemandMini(loadedCities) { mini ->
                     cityDemandMini = mini
                     isLoading = false
+                    lastRefreshAt = System.currentTimeMillis()
                 }
             }
 
-            delay(20_000)
+            delay(5_000)
         }
     }
 
@@ -1265,6 +1605,16 @@ fun DemandByRegionScreen(firestoreManager: FirestoreManager?) {
             fontSize = 14.sp,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
         )
+
+        if (lastRefreshAt > 0L) {
+            val elapsedSeconds = ((nowTick - lastRefreshAt) / 1000L).coerceAtLeast(0L)
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Atualizado há ${elapsedSeconds}s",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
+            )
+        }
 
         Spacer(modifier = Modifier.height(20.dp))
 
@@ -1478,16 +1828,47 @@ fun RegionalStatColumn(label: String, value: String, subtitle: String) {
 // ===============================================
 @Composable
 fun PermissionsScreen(
+    refreshTick: Int = 0,
     onRequestOverlayPermission: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
     onRequestLocationPermission: () -> Unit
 ) {
     val context = LocalContext.current
-    val hasOverlayPermission = Settings.canDrawOverlays(context)
-    val hasLocationPermission = ContextCompat.checkSelfPermission(
-        context, Manifest.permission.ACCESS_FINE_LOCATION
-    ) == PackageManager.PERMISSION_GRANTED
-    val hasAccessibility = isAccessibilityEnabled(context)
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    var hasOverlayPermission by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
+    var hasLocationPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+    var hasAccessibility by remember { mutableStateOf(isAccessibilityEnabled(context)) }
+
+    fun refreshPermissionsState() {
+        hasOverlayPermission = Settings.canDrawOverlays(context)
+        hasLocationPermission = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        hasAccessibility = isAccessibilityEnabled(context)
+    }
+
+    LaunchedEffect(refreshTick) {
+        refreshPermissionsState()
+    }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                refreshPermissionsState()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     val allGranted = hasOverlayPermission && hasLocationPermission && hasAccessibility
 
@@ -1597,13 +1978,13 @@ fun TipsScreen() {
     ) {
         TipCard(
             emoji = "🚀",
-            title = "Começando",
+            title = "Começando (Fluxo Atual)",
             tips = listOf(
-                "1. Conceda todas as permissões na seção de Permissões",
-                "2. Toque em \"Iniciar Análise\" na tela inicial",
-                "3. Um botão flutuante aparecerá na tela",
-                "4. Abra o Uber ou 99 normalmente",
-                "5. Quando uma corrida chegar, a análise aparece automaticamente"
+                "1. Conceda Sobreposição, Acessibilidade e Localização na seção Permissões",
+                "2. Na Home, ative o serviço principal (status Ativado)",
+                "3. Use o botão verde 'Pausar análise' para pausar sem desligar o app",
+                "4. Se estiver pausado, o botão fica cinza com 'Ativar análise'",
+                "5. Abra Uber ou 99 normalmente para iniciar as análises em tempo real"
             )
         )
 
@@ -1611,13 +1992,13 @@ fun TipsScreen() {
 
         TipCard(
             emoji = "📊",
-            title = "Entendendo a Análise",
+            title = "Entendendo o Card de Corrida",
             tips = listOf(
-                "Score de 0 a 100: quanto maior, melhor a corrida",
-                "🟢 Score ≥ 60: Compensa aceitar",
-                "🟡 Score 40-59: Neutro, analise com cuidado",
-                "🔴 Score < 40: Não compensa, melhor esperar",
-                "O score considera: preço/km, ganho/hora, distância de embarque e horário"
+                "O card mostra recomendação: COMPENSA, EVITAR ou NEUTRO",
+                "As métricas principais são valor, km até passageiro, km destino, R$/km e R$/h",
+                "Considere as razões exibidas no insight rápido para decisão final",
+                "A recomendação usa suas referências configuradas (preço/km e ganho/hora)",
+                "Endereços de embarque e destino ajudam a validar contexto da corrida"
             )
         )
 
@@ -1625,25 +2006,13 @@ fun TipsScreen() {
 
         TipCard(
             emoji = "💡",
-            title = "Botão Flutuante",
+            title = "Botão Flutuante e Status",
             tips = listOf(
                 "Arraste o botão para qualquer posição na tela",
-                "Segure o botão para ver o painel de demanda",
-                "O painel mostra ganhos da sessão e dica de pausa inteligente",
-                "Indicadores de demanda mostram se está aquecido ou frio"
-            )
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        TipCard(
-            emoji = "⚙️",
-            title = "Personalizando",
-            tips = listOf(
-                "Acesse 'Configurar Corrida' no menu para ajustar seus critérios",
-                "Defina seu valor mínimo por km aceito",
-                "Ajuste a distância máxima para buscar o passageiro",
-                "Corridas fora dos seus limites são penalizadas automaticamente"
+                "Segure o botão para abrir o card 'Status'",
+                "No Status, use Pausar/Ativar análise sem encerrar o serviço",
+                "Borda do card de análise: verde quando ativa, vermelha quando pausada/desativada",
+                "Borda do botão flutuante segue o mesmo estado (ativo x pausado)"
             )
         )
 
@@ -1651,12 +2020,25 @@ fun TipsScreen() {
 
         TipCard(
             emoji = "📈",
-            title = "Análise e Histórico",
+            title = "Monitoramento de Demanda",
             tips = listOf(
-                "Acompanhe seus ganhos diários na 'Análise do Dia'",
-                "Compare seu desempenho semanal em 'Comparação Semanal'",
-                "O histórico guarda todas as corridas aceitas automaticamente",
-                "Use os dados para identificar seus melhores horários e regiões"
+                "Com login Google, o card mostra histórico de ofertas do dia",
+                "Mini card da Uber usa fundo azul-marinho e mini card da 99 usa fundo amarelo",
+                "Compare ofertas por plataforma, preço médio, R$/km, distância e tempo",
+                "Use os dados para ajustar estratégia por horário e região"
+            )
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        TipCard(
+            emoji = "⚙️",
+            title = "Funções que Permanecem",
+            tips = listOf(
+                "Configurar Corrida continua sendo o local para ajustar seus critérios",
+                "Permissões continuam essenciais para leitura e análise em tempo real",
+                "Análise do Dia e Comparação Semanal seguem como base de acompanhamento",
+                "Demanda por Região ajuda a decidir onde e quando operar"
             )
         )
 
@@ -1670,7 +2052,8 @@ fun TipsScreen() {
 @Composable
 fun LoginScreen(
     firestoreManager: FirestoreManager,
-    onLoginSuccess: () -> Unit = {}
+    onLoginSuccess: () -> Unit = {},
+    onLogoutSuccess: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1705,6 +2088,7 @@ fun LoginScreen(
                 firestoreManager.signOut()
                 DriverPreferences(context).applyToAnalyzer()
                 isGoogleLoggedIn = false
+                onLogoutSuccess()
             }
         })
         return
@@ -2617,7 +3001,7 @@ fun DemandMonitorCard(
                         modifier = Modifier
                             .weight(1f)
                             .background(
-                                Color(0xFF000000).copy(alpha = 0.15f),
+                                Color(0xFF0D1B3D),
                                 RoundedCornerShape(10.dp)
                             )
                             .padding(12.dp)
@@ -2627,14 +3011,15 @@ fun DemandMonitorCard(
                                 text = "UBER",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                                color = Color.White.copy(alpha = 0.8f),
                                 letterSpacing = 1.sp
                             )
                             Spacer(modifier = Modifier.height(6.dp))
                             Text(
                                 text = "${firebaseStats.offersUber} ofertas",
                                 fontSize = 15.sp,
-                                fontWeight = FontWeight.Bold
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
                             )
 
                             Spacer(modifier = Modifier.height(6.dp))
@@ -2642,12 +3027,12 @@ fun DemandMonitorCard(
                             Text(
                                 text = "Médio: ${if (firebaseStats.avgPriceUber > 0) String.format("R$ %.2f", firebaseStats.avgPriceUber) else "—"}",
                                 fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                                color = Color.White.copy(alpha = 0.85f)
                             )
                             Text(
                                 text = "${if (firebaseStats.avgPricePerKmUber > 0) String.format("R$ %.2f/km", firebaseStats.avgPricePerKmUber) else "—/km"} • ${if (firebaseStats.avgDistanceKmUber > 0) String.format("%.1f km", firebaseStats.avgDistanceKmUber) else "— km"} • ${if (firebaseStats.avgEstimatedTimeMinUber > 0) String.format("%.0f min", firebaseStats.avgEstimatedTimeMinUber) else "— min"}",
                                 fontSize = 11.sp,
-                                color = Color(0xFF4CAF50)
+                                color = Color(0xFF90CAF9)
                             )
                         }
                     }
@@ -2657,7 +3042,7 @@ fun DemandMonitorCard(
                         modifier = Modifier
                             .weight(1f)
                             .background(
-                                Color(0xFFFF6F00).copy(alpha = 0.10f),
+                                Color(0xFFFFEB3B),
                                 RoundedCornerShape(10.dp)
                             )
                             .padding(12.dp)
@@ -2667,14 +3052,15 @@ fun DemandMonitorCard(
                                 text = "99",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                                color = Color(0xFF212121),
                                 letterSpacing = 1.sp
                             )
                             Spacer(modifier = Modifier.height(6.dp))
                             Text(
                                 text = "${firebaseStats.offers99} ofertas",
                                 fontSize = 15.sp,
-                                fontWeight = FontWeight.Bold
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF212121)
                             )
 
                             Spacer(modifier = Modifier.height(6.dp))
@@ -2682,12 +3068,12 @@ fun DemandMonitorCard(
                             Text(
                                 text = "Médio: ${if (firebaseStats.avgPrice99 > 0) String.format("R$ %.2f", firebaseStats.avgPrice99) else "—"}",
                                 fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                                color = Color(0xFF212121).copy(alpha = 0.85f)
                             )
                             Text(
                                 text = "${if (firebaseStats.avgPricePerKm99 > 0) String.format("R$ %.2f/km", firebaseStats.avgPricePerKm99) else "—/km"} • ${if (firebaseStats.avgDistanceKm99 > 0) String.format("%.1f km", firebaseStats.avgDistanceKm99) else "— km"} • ${if (firebaseStats.avgEstimatedTimeMin99 > 0) String.format("%.0f min", firebaseStats.avgEstimatedTimeMin99) else "— min"}",
                                 fontSize = 11.sp,
-                                color = Color(0xFFFF6F00)
+                                color = Color(0xFF5D4037)
                             )
                         }
                     }

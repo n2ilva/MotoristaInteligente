@@ -45,10 +45,13 @@ class FirestoreManager(private val context: Context) {
 
         // Critério mínimo para persistir oferta no Firebase:
         // - conter valor explícito em moeda (R$)
-        // - conter ao menos dois km no formato entre parênteses: (X km)
+        // - conter ao menos dois sinais de distância (km/m), em qualquer combinação
+        //   Ex.: km+km, m+km, km+m, m+m
         private val FIREBASE_REQUIRED_PRICE_PATTERN = Regex("""R\$\s*\d""")
-        private val FIREBASE_REQUIRED_KM_IN_PAREN_PATTERN =
-            Regex("""\(\s*\d{1,3}(?:[,.]\d+)?\s*km\s*\)""", RegexOption.IGNORE_CASE)
+        private val FIREBASE_REQUIRED_KM_VALUE_PATTERN =
+            Regex("""\b\d{1,3}(?:[,.]\d+)?\s*km\b""", RegexOption.IGNORE_CASE)
+        private val FIREBASE_REQUIRED_METERS_VALUE_PATTERN =
+            Regex("""\b\d{1,4}\s*m\b""", RegexOption.IGNORE_CASE)
     }
 
     private val db = FirebaseFirestore.getInstance()
@@ -353,8 +356,9 @@ class FirestoreManager(private val context: Context) {
         val hasPriceToken = FIREBASE_REQUIRED_PRICE_PATTERN.containsMatchIn(rawText)
         if (!hasPriceToken) return false
 
-        val kmPairsCount = FIREBASE_REQUIRED_KM_IN_PAREN_PATTERN.findAll(rawText).count()
-        return kmPairsCount >= 2
+        val kmCount = FIREBASE_REQUIRED_KM_VALUE_PATTERN.findAll(rawText).count()
+        val metersCount = FIREBASE_REQUIRED_METERS_VALUE_PATTERN.findAll(rawText).count()
+        return (kmCount + metersCount) >= 2
     }
 
     private fun resolveOfferLocation(
@@ -430,10 +434,10 @@ class FirestoreManager(private val context: Context) {
 
     private fun resolveOfferSourceByTextRule(rideData: RideData): AppSource {
         val raw = rideData.rawText
-        if (raw.contains("UberX", ignoreCase = true)) {
-            return AppSource.UBER
-        }
-        return AppSource.NINETY_NINE
+        val detectedFromText = RideOcrAppClassifier.detectAppSourceFromScreenText(raw)
+        if (detectedFromText != AppSource.UNKNOWN) return detectedFromText
+        if (rideData.appSource != AppSource.UNKNOWN) return rideData.appSource
+        return AppSource.UNKNOWN
     }
 
     // ========================
@@ -622,6 +626,92 @@ class FirestoreManager(private val context: Context) {
         val lastOfferTimestamp: Long = 0L,
         val loaded: Boolean = false
     )
+
+    data class WeeklyPlatformDayAnalytics(
+        val dateKey: String = "",
+        val dayOfWeek: Int = Calendar.SUNDAY,
+        val totalOffers: Int = 0,
+        val offersUber: Int = 0,
+        val offers99: Int = 0,
+        val avgPriceUber: Double = 0.0,
+        val avgPrice99: Double = 0.0,
+        val avgPricePerKmUber: Double = 0.0,
+        val avgPricePerKm99: Double = 0.0
+    )
+
+    fun loadCurrentWeekDailyAnalytics(onResult: (List<WeeklyPlatformDayAnalytics>) -> Unit) {
+        ensureAuthenticated(
+            onReady = { uid ->
+                val weekStart = Calendar.getInstance().apply {
+                    set(Calendar.DAY_OF_WEEK, Calendar.SUNDAY)
+                    set(Calendar.HOUR_OF_DAY, 0)
+                    set(Calendar.MINUTE, 0)
+                    set(Calendar.SECOND, 0)
+                    set(Calendar.MILLISECOND, 0)
+                }
+                val weekEnd = (weekStart.clone() as Calendar).apply {
+                    add(Calendar.DAY_OF_YEAR, 6)
+                    set(Calendar.HOUR_OF_DAY, 23)
+                    set(Calendar.MINUTE, 59)
+                    set(Calendar.SECOND, 59)
+                    set(Calendar.MILLISECOND, 999)
+                }
+
+                val startKey = dayKeyFromTimestamp(weekStart.timeInMillis)
+                val endKey = dayKeyFromTimestamp(weekEnd.timeInMillis)
+
+                db.collection(COLLECTION_ANALYTICS_DRIVER_DAILY)
+                    .whereEqualTo("uid", uid)
+                    .whereGreaterThanOrEqualTo("dateKey", startKey)
+                    .whereLessThanOrEqualTo("dateKey", endKey)
+                    .orderBy("dateKey", Query.Direction.ASCENDING)
+                    .get()
+                    .addOnSuccessListener { snapshot ->
+                        val byDateKey = snapshot.documents.associateBy { it.getString("dateKey").orEmpty() }
+
+                        val result = mutableListOf<WeeklyPlatformDayAnalytics>()
+                        for (offset in 0..6) {
+                            val current = (weekStart.clone() as Calendar).apply {
+                                add(Calendar.DAY_OF_YEAR, offset)
+                            }
+                            val dateKey = dayKeyFromTimestamp(current.timeInMillis)
+                            val doc = byDateKey[dateKey]
+
+                            fun longOrZero(field: String): Int =
+                                doc?.getLong(field)?.toInt() ?: 0
+
+                            fun doubleOrZero(field: String): Double =
+                                doc?.getDouble(field)
+                                    ?: doc?.getLong(field)?.toDouble()
+                                    ?: 0.0
+
+                            result.add(
+                                WeeklyPlatformDayAnalytics(
+                                    dateKey = dateKey,
+                                    dayOfWeek = current.get(Calendar.DAY_OF_WEEK),
+                                    totalOffers = longOrZero("firebaseTotalOffersToday"),
+                                    offersUber = longOrZero("firebaseOffersUber"),
+                                    offers99 = longOrZero("firebaseOffers99"),
+                                    avgPriceUber = doubleOrZero("firebaseAvgPriceUber"),
+                                    avgPrice99 = doubleOrZero("firebaseAvgPrice99"),
+                                    avgPricePerKmUber = doubleOrZero("firebaseAvgPricePerKmUber"),
+                                    avgPricePerKm99 = doubleOrZero("firebaseAvgPricePerKm99")
+                                )
+                            )
+                        }
+
+                        onResult(result)
+                    }
+                    .addOnFailureListener { e ->
+                        Log.e(TAG, "Erro ao carregar analytics semanais", e)
+                        onResult(emptyList())
+                    }
+            },
+            onError = {
+                onResult(emptyList())
+            }
+        )
+    }
 
     /**
      * Carrega todas as ofertas de hoje do Firebase e calcula estatísticas agregadas.
@@ -946,13 +1036,13 @@ class FirestoreManager(private val context: Context) {
         cities: List<String>,
         onResult: (List<CityDemandMini>) -> Unit
     ) {
-        val currentBucketStart = currentDemandBucketStart()
+        val rollingWindowStart = System.currentTimeMillis() - DEMAND_BUCKET_10M_MS
         val expiryThreshold = System.currentTimeMillis() - DRIVER_LOCATION_EXPIRY_MS
 
-        db.collection(COLLECTION_REGIONAL_DEMAND_15M)
-            .whereEqualTo("bucketStart", currentBucketStart)
+        db.collection(COLLECTION_REGIONAL_OFFERS)
+            .whereGreaterThanOrEqualTo("timestamp", rollingWindowStart)
             .get()
-            .addOnSuccessListener { demandSnapshot ->
+            .addOnSuccessListener { offersSnapshot ->
                 data class Totals(
                     var total: Int = 0,
                     var uber: Int = 0,
@@ -963,44 +1053,27 @@ class FirestoreManager(private val context: Context) {
                 val cityTotals = mutableMapOf<String, Totals>()
                 val neighborhoodTotalsByCity = mutableMapOf<String, MutableMap<String, Totals>>()
 
-                for (doc in demandSnapshot.documents) {
+                for (doc in offersSnapshot.documents) {
                     val city = doc.getString("city")?.trim().orEmpty()
                     if (city.isBlank()) continue
 
-                    val total = doc.getLong("offersTotal")?.toInt() ?: 0
-                    val uber = doc.getLong("offersUber")?.toInt() ?: 0
-                    val ninetyNine = doc.getLong("offers99")?.toInt() ?: 0
-                    val activeDrivers = doc.getLong("activeDrivers")?.toInt() ?: 0
+                    val appSource = doc.getString("appSource") ?: ""
+                    val isUber = isUberSource(appSource)
+                    val isNinetyNine = isNinetyNineSource(appSource)
 
                     val neighborhood = doc.getString("neighborhood")?.trim().orEmpty()
-                    if (neighborhood.isBlank()) {
-                        cityTotals[city] = Totals(
-                            total = total,
-                            uber = uber,
-                            ninetyNine = ninetyNine,
-                            activeDrivers = activeDrivers
-                        )
-                    } else {
-                        val cityNeighborhoods = neighborhoodTotalsByCity.getOrPut(city) { mutableMapOf() }
-                        cityNeighborhoods[neighborhood] = Totals(
-                            total = total,
-                            uber = uber,
-                            ninetyNine = ninetyNine,
-                            activeDrivers = activeDrivers
-                        )
-                    }
-                }
 
-                for ((city, neighborhoodsMap) in neighborhoodTotalsByCity) {
-                    if (cityTotals[city] == null) {
-                        val aggregated = neighborhoodsMap.values.fold(Totals()) { acc, next ->
-                            acc.total += next.total
-                            acc.uber += next.uber
-                            acc.ninetyNine += next.ninetyNine
-                            acc.activeDrivers += next.activeDrivers
-                            acc
-                        }
-                        cityTotals[city] = aggregated
+                    val cityAcc = cityTotals.getOrPut(city) { Totals() }
+                    cityAcc.total += 1
+                    if (isUber) cityAcc.uber += 1
+                    if (isNinetyNine) cityAcc.ninetyNine += 1
+
+                    if (neighborhood.isNotBlank()) {
+                        val cityNeighborhoods = neighborhoodTotalsByCity.getOrPut(city) { mutableMapOf() }
+                        val neighborhoodAcc = cityNeighborhoods.getOrPut(neighborhood) { Totals() }
+                        neighborhoodAcc.total += 1
+                        if (isUber) neighborhoodAcc.uber += 1
+                        if (isNinetyNine) neighborhoodAcc.ninetyNine += 1
                     }
                 }
 

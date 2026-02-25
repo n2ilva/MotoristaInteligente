@@ -131,12 +131,12 @@ class RideInfoOcrService : AccessibilityService() {
             RegexOption.IGNORE_CASE
         )
         private val PICKUP_TIME_PATTERN = Regex(
-            """(?:buscar|embarque|pickup|retirada|chegar|chegada|até\s+(?:o\s+)?passageiro|ir\s+até)[^\d]{0,20}(\d{1,3})\s*min""",
+            """(?:buscar|embarque|pickup|retirada|chegar|chegada|até\s+(?:o\s+)?passageiro|ir\s+até)[^\d]{0,20}(\d{1,3})\s*min(?:utos?)?""",
             RegexOption.IGNORE_CASE
         )
-        // Padrão inline: "X min (Y km)" — comum na Uber para exibir pickup
+        // Padrão inline: "X min (Y km)" / "X minuto (Y km)" / "X minutos (Y km)" — Uber e 99
         private val PICKUP_INLINE_PATTERN = Regex(
-            """(\d{1,2})\s*min\s*\(?\s*(\d{1,3}(?:[,\.]\d+)?)\s*km\s*\)?""",
+            """(\d{1,2})\s*min(?:utos?)?\s*\(?\s*(\d{1,3}(?:[,\.]\d+)?)\s*km\s*\)?""",
             RegexOption.IGNORE_CASE
         )
 
@@ -145,6 +145,16 @@ class RideInfoOcrService : AccessibilityService() {
         // Uber: "7 minutos (3.0 km) de distância" / "Viagem de 10 minutos (5.6 km)"
         private val ROUTE_PAIR_PATTERN = Regex(
             """(\d{1,3})\s*min(?:utos?)?\s*\(\s*(\d{1,3}(?:[,\.]\d+)?)\s*km\s*\)""",
+            RegexOption.IGNORE_CASE
+        )
+        // 99: pickup expresso em metros: "3min (843m)" — passageiro muito próximo
+        private val ROUTE_PAIR_METERS_PATTERN = Regex(
+            """(\d{1,3})\s*min(?:utos?)?\s*\(\s*(\d{2,4})\s*m\s*\)""",
+            RegexOption.IGNORE_CASE
+        )
+        // Distância em metros entre parênteses: (843m) / (200 m) — formato 99 para pickup curto
+        private val METERS_IN_PAREN_PATTERN = Regex(
+            """\(\s*(\d{2,4})\s*m\s*\)""",
             RegexOption.IGNORE_CASE
         )
 
@@ -165,7 +175,10 @@ class RideInfoOcrService : AccessibilityService() {
             "Score:"
         )
         private val OWN_CARD_NOISE_TOKENS = listOf(
-            "r\$/km", "r\$km", "r\$/min", "km total",
+            "r\$/km", "r\$km", "r\$/min", "r\$/h", "km total",
+            "valor corrida",
+            "dentro dos seus parâmetros", "dentro dos seus parametros",
+            "não compensa", "nao compensa",
             "endereço não disponível", "endereco não disponível",
             "destino não disponível", "destino nao disponível", "destino nao disponivel",
             "motorista inteligente", "compensa", "evitar", "neutro", "score"
@@ -205,6 +218,9 @@ class RideInfoOcrService : AccessibilityService() {
         private val MIN_VALUE_PATTERN = Regex("""\b\d{1,3}\s*(?:n?\s*min(?:utos?)?)\b""", RegexOption.IGNORE_CASE)
         // Ex.: 3 km / 2,5 km / 1.2km
         private val KM_VALUE_PATTERN = Regex("""\b\d{1,3}(?:[\.,]\d+)?\s*km\b""", RegexOption.IGNORE_CASE)
+        // Ex.: 843m / 500 m / 1200m — qualquer valor em metros (parênteses ou não).
+        // \b após m evita match em "30min" (m seguido de 'i' não tem word boundary).
+        private val METERS_VALUE_PATTERN = Regex("""\b(\d{1,4})\s*m\b""", RegexOption.IGNORE_CASE)
 
         // ========================
         // Padrões de detecção por TEXTO DA TELA (não por pacote)
@@ -251,6 +267,12 @@ class RideInfoOcrService : AccessibilityService() {
             """Aceitar\s+por\s+R\$\s*(\d{1,4}(?:[,\.]\d{1,2})?)""",
             RegexOption.IGNORE_CASE
         )
+        // 99: "Prioritário" simples (sem "Pop Expresso") seguido de preço
+        // Ex.: "Prioritário\nR$32,70\nR$1,23/km" — R$1,23 é filtrado por MIN_RIDE_PRICE
+        private val NINETY_NINE_PRIORITARIO_SIMPLE_PATTERN = Regex(
+            """Priorit[áa]rio[\s\S]{0,80}?R\$\s*(\d{1,4}(?:[,\.]\d{1,2})?)""",
+            RegexOption.IGNORE_CASE
+        )
 
         // Rating do passageiro no header do card
         // Uber: "4,93 (274)" ou "4,93 (274) - Verificado"
@@ -290,6 +312,10 @@ class RideInfoOcrService : AccessibilityService() {
         // Debounce: reduzir latência sem perder estabilidade
         private const val DEBOUNCE_DELAY = 250L // 250ms
 
+        // Delay para aguardar animação de entrada do card (Uber desliza o card de baixo para cima)
+        // Sem esse delay, o OCR captura o card parcialmente renderizado e obtém dados corrompidos
+        private const val CARD_RENDER_DELAY_MS = 700L  // 700ms para STATE_CHANGED (nova tela/popup)
+
         var isServiceConnected = false
             private set
 
@@ -327,6 +353,7 @@ class RideInfoOcrService : AccessibilityService() {
     private val EMPTY_TREE_OCR_COOLDOWN_MS = 700L  // Mais responsivo para corridas consecutivas
     private var ocrRetryPending = false
     private var pendingOcrRetryRunnable: Runnable? = null
+    private var pendingStateOcrRunnable: Runnable? = null
 
     // ========================
     // Detecção de Aceitação de Corrida
@@ -508,10 +535,16 @@ class RideInfoOcrService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
 
+        if (!AnalysisServiceState.isEnabled(this) || AnalysisServiceState.isPaused(this)) return
+
         val packageName = event.packageName?.toString() ?: return
 
         // IGNORAR eventos do nosso próprio app
-        if (packageName.isOwnPackageName()) return
+        if (packageName.isOwnPackageName()) {
+            pendingStateOcrRunnable?.let { debounceHandler.removeCallbacks(it) }
+            pendingStateOcrRunnable = null
+            return
+        }
 
         // Não filtrar por pacote — ler a tela inteira e detectar Uber/99 pelo conteúdo
 
@@ -601,6 +634,7 @@ class RideInfoOcrService : AccessibilityService() {
         super.onDestroy()
         isServiceConnected = false
         debounceHandler.removeCallbacksAndMessages(null)
+        pendingStateOcrRunnable = null
         healthCheckRunnable?.let { debounceHandler.removeCallbacks(it) }
         healthCheckRunnable = null
         pendingRideData = null
@@ -825,8 +859,18 @@ class RideInfoOcrService : AccessibilityService() {
     }
 
     private fun handleWindowChange(event: AccessibilityEvent, packageName: String, isStateChange: Boolean) {
-        val triggerReason = if (isStateChange) "window-state-ocr-only" else "window-content-ocr-only"
-        requestOcrFallbackForOffer(packageName, triggerReason)
+        if (isStateChange) {
+            // Aguardar a animação de entrada do card completar (ex.: Uber desliza card de baixo)
+            // antes de disparar o OCR, para evitar capturar dados parcialmente renderizados
+            pendingStateOcrRunnable?.let { debounceHandler.removeCallbacks(it) }
+            val stateRunnable = Runnable {
+                requestOcrFallbackForOffer(packageName, "window-state-ocr-only")
+            }
+            pendingStateOcrRunnable = stateRunnable
+            debounceHandler.postDelayed(stateRunnable, CARD_RENDER_DELAY_MS)
+        } else {
+            requestOcrFallbackForOffer(packageName, "window-content-ocr-only")
+        }
     }
 
     private fun recoverFromForeignIdLeakIfNeeded(text: String, packageName: String): String {
@@ -1172,20 +1216,47 @@ class RideInfoOcrService : AccessibilityService() {
         if (text.isBlank()) return false
 
         // Se bater nos padrões específicos de Uber ou 99, é sinal forte
-        if (isRecognizedRideCard(text) && PRICE_PATTERN.containsMatchIn(text) && hasAtLeastTwoKmSignals(text)) return true
+        val recognizedCard = isRecognizedRideCard(text)
+        if (recognizedCard && PRICE_PATTERN.containsMatchIn(text) && hasAtLeastTwoKmSignals(text)) return true
 
         val hasPrice = PRICE_PATTERN.containsMatchIn(text)
-        val hasKm = KM_VALUE_PATTERN.containsMatchIn(text)
-        val hasTwoKmValues = hasAtLeastTwoKmSignals(text)
+        val hasTwoDistanceSignals = hasAtLeastTwoKmSignals(text)
+        val hasActionContext =
+            containsAnyIgnoreCase(text, ACTION_KEYWORDS) ||
+                containsAnyIgnoreCase(text, CONTEXT_KEYWORDS)
 
-        if (hasPrice && hasKm && hasTwoKmValues) return true
+        if (hasPrice && hasTwoDistanceSignals && hasActionContext) return true
 
         return false
     }
 
+    private fun hasVisibleMonitoredWindow(): Boolean {
+        return try {
+            val allWindows = windows ?: return false
+            allWindows.any { window ->
+                val root = try { window.root } catch (_: Exception) { null } ?: return@any false
+                val rootPkg = root.packageName?.toString().orEmpty()
+                rootPkg.isNotBlank() &&
+                    !rootPkg.isOwnPackageName() &&
+                    isMonitoredPackage(rootPkg)
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private fun hasAtLeastTwoKmSignals(text: String): Boolean {
-        val parenthesizedKmCount = KM_IN_PAREN_PATTERN.findAll(text).count()
-        return parenthesizedKmCount >= 2
+        // Aceita qualquer combinação de 2 sinais de distância:
+        //   km + km  → Uber (ex: "3min (1,1km)" + "33min (25,7km)")
+        //   m  + km  → 99 pickup em metros (ex: "3min (843m)" + "33min (25,7km)")
+        //   km + m   → raro, mas possível
+        //   m  + m   → corridas curtíssimas
+        //
+        // KM_VALUE_PATTERN  cobre '\b{N}km\b' (com ou sem parênteses)
+        // METERS_VALUE_PATTERN cobre '\b{N}m\b' — a \b após 'm' impede match em "30min"
+        val kmCount = KM_VALUE_PATTERN.findAll(text).count()
+        val mCount  = METERS_VALUE_PATTERN.findAll(text).count()
+        return (kmCount + mCount) >= 2
     }
 
     /**
@@ -1339,7 +1410,57 @@ class RideInfoOcrService : AccessibilityService() {
      * Uber: "UberX - Exclusivo - R$ XX" / "UberX - R$ XX" / "UberX . Adolescentes - R$ XX"
      * 99: "Corrida Longa - R$ XX" / "Negocia - R$ XX" / "Prioritário - Pop Expresso - R$ XX"
      */
+    private fun parseFirstPriceFromMiddleThird(text: String, appSource: AppSource): Double? {
+        val lines = text
+            .lines()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+
+        if (lines.size < 3) return null
+
+        val middleStart = lines.size / 3
+        val middleEndExclusive = (lines.size * 2 / 3).coerceAtLeast(middleStart + 1)
+        val middleLines = lines.subList(middleStart, middleEndExclusive)
+        val middleText = middleLines.joinToString("\n")
+
+        if (appSource == AppSource.UBER) {
+            val uberMiddlePrice = Regex(
+                """UberX[\s\S]{0,100}?R\$\s*(\d{1,4}(?:[,\.]\d{1,2})?)""",
+                RegexOption.IGNORE_CASE
+            ).find(middleText)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.replace(",", ".")
+                ?.toDoubleOrNull()
+            if (uberMiddlePrice != null && uberMiddlePrice >= MIN_RIDE_PRICE) return uberMiddlePrice
+        }
+
+        val matches = PRICE_PATTERN.findAll(middleText).toList()
+        if (matches.isEmpty()) return null
+
+        val validMatches = matches.filter {
+            parsePriceFromMatch(it)?.let { price -> price >= MIN_RIDE_PRICE } == true
+        }
+        if (validMatches.isEmpty()) return null
+
+        if (appSource == AppSource.NINETY_NINE) {
+            // 99 pode ter 2 valores: valor da corrida + valor médio/km.
+            // No terço do meio, preferir o primeiro preço que NÃO seja média por km.
+            val firstRidePrice = validMatches
+                .firstOrNull { !isAvgPerKmPriceMatch(middleText, it) }
+                ?.let { parsePriceFromMatch(it) }
+            if (firstRidePrice != null) return firstRidePrice
+        }
+
+        return parsePriceFromMatch(validMatches.first())
+    }
+
     private fun parseCardPrice(text: String, appSource: AppSource): Double? {
+        // Filtro por posição: divide o texto em 3 partes e usa o primeiro R$ do terço do meio.
+        // Aplicado apenas para o valor da corrida; demais campos seguem lógica existente.
+        val middleThirdPrice = parseFirstPriceFromMiddleThird(text, appSource)
+        if (middleThirdPrice != null) return middleThirdPrice
+
         return when (appSource) {
             AppSource.UBER -> {
                 val strict = UBER_CARD_PATTERN.findAll(text)
@@ -1376,7 +1497,14 @@ class RideInfoOcrService : AccessibilityService() {
                     .filter { it >= MIN_RIDE_PRICE }
                     .maxOrNull()
 
-                val strict = listOfNotNull(corridaLongaMax, negociaMax, prioritarioMax, aceitarMax).maxOrNull()
+                // Prioritário simples (sem "Pop Expresso") — pega o maior valor ≥ MIN_RIDE_PRICE
+                // R$1,23/km e R$1,13 (taxa) são filtrados por MIN_RIDE_PRICE automaticamente
+                val prioritarioSimpleMax = NINETY_NINE_PRIORITARIO_SIMPLE_PATTERN.findAll(text)
+                    .mapNotNull { it.groupValues.getOrNull(1)?.replace(",", ".")?.toDoubleOrNull() }
+                    .filter { it >= MIN_RIDE_PRICE }
+                    .maxOrNull()
+
+                val strict = listOfNotNull(corridaLongaMax, negociaMax, prioritarioMax, aceitarMax, prioritarioSimpleMax).maxOrNull()
                 if (strict != null) return strict
 
                 val genericMatches = PRICE_PATTERN.findAll(text).toList()
@@ -1579,12 +1707,12 @@ class RideInfoOcrService : AccessibilityService() {
         )
 
         val hasPriceToken = PRICE_PATTERN.containsMatchIn(text)
-        val kmPairsCount = KM_IN_PAREN_PATTERN.findAll(text).count()
-        if (normalizedPrice <= 0.0 || !hasPriceToken || kmPairsCount < 2) {
+        val hasKmSignals = hasAtLeastTwoKmSignals(text)
+        if (normalizedPrice <= 0.0 || !hasPriceToken || !hasKmSignals) {
             Log.d(
                 TAG,
-                "Corrida ignorada por critério unificado (R$ + 2x km em parênteses). " +
-                    "price=$normalizedPrice, hasPriceToken=$hasPriceToken, kmPairsCount=$kmPairsCount"
+                "Corrida ignorada por critério unificado (R$ + 2x km). " +
+                    "price=$normalizedPrice, hasPriceToken=$hasPriceToken, hasKmSignals=$hasKmSignals"
             )
             return
         }
@@ -1761,8 +1889,10 @@ class RideInfoOcrService : AccessibilityService() {
         }
 
         val bestByScore = candidates.maxByOrNull { it.score } ?: return null
-        val highestPriceCandidate = candidates.maxByOrNull { it.price } ?: return null
-        val chosen = if (candidates.size > 1) highestPriceCandidate else bestByScore
+        // Usar o candidato de maior pontuação contextual.
+        // NÃO usar o de maior preço: valores do nosso próprio card de análise (ex.: R$320 = Valor Corrida)
+        // podem vazar para o texto e seriam erroneamente selecionados como o preço da corrida.
+        val chosen = bestByScore
 
         if (chosen.score < 3 && candidates.size == 1) {
             val key = "offer-candidate-low-score"
@@ -2050,13 +2180,22 @@ class RideInfoOcrService : AccessibilityService() {
      */
     private fun parseOcrRoutePairs(text: String): StructuredExtraction? {
         val routePairs = ROUTE_PAIR_PATTERN.findAll(text).toList()
+        // 99: pickup em metros ("3min (843m)") — converter para km
+        val routePairsMeters = ROUTE_PAIR_METERS_PATTERN.findAll(text).toList()
         val parenthesizedKm = KM_IN_PAREN_PATTERN.findAll(text)
             .mapNotNull { it.groupValues.getOrNull(1)?.replace(",", ".")?.toDoubleOrNull() }
             .filter { it in 0.1..300.0 }
             .toList()
+        val parenthesizedMeters = METERS_IN_PAREN_PATTERN.findAll(text)
+            .mapNotNull { it.groupValues.getOrNull(1)?.toDoubleOrNull()?.div(1000.0) }
+            .filter { it in 0.01..2.0 } // pickup em metros geralmente < 2km
+            .toList()
 
         parenthesizedKm.forEachIndexed { idx, km ->
             Log.d(TAG, "OCR km-parenteses[$idx]: $km")
+        }
+        parenthesizedMeters.forEachIndexed { idx, m ->
+            Log.d(TAG, "OCR metros-parenteses[$idx]: ${String.format("%.3f", m)}km")
         }
 
         var pickupKm: Double? = null
@@ -2065,6 +2204,14 @@ class RideInfoOcrService : AccessibilityService() {
         if (parenthesizedKm.size >= 2) {
             pickupKm = parenthesizedKm[0]
             rideKm = parenthesizedKm[1]
+        } else if (parenthesizedKm.size == 1 && parenthesizedMeters.isNotEmpty()) {
+            // 99: ex. "3min (843m)" = pickup 0.843km + "33min (25,7km)" = corrida
+            pickupKm = parenthesizedMeters[0]
+            rideKm = parenthesizedKm[0]
+        } else if (routePairsMeters.isNotEmpty() && routePairs.isNotEmpty()) {
+            // fallback: par de metros + par de km
+            pickupKm = routePairsMeters.first().groupValues[2].toDoubleOrNull()?.div(1000.0)
+            rideKm = routePairs.first().groupValues[2].replace(",", ".").toDoubleOrNull()
         } else if (routePairs.size >= 2) {
             pickupKm = routePairs[0].groupValues[2].replace(",", ".").toDoubleOrNull()
             rideKm = routePairs[1].groupValues[2].replace(",", ".").toDoubleOrNull()
@@ -2301,8 +2448,9 @@ class RideInfoOcrService : AccessibilityService() {
         if (!OCR_FALLBACK_ENABLED) return false
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
 
-        val appSource = detectAppSource(packageName)
-        if (appSource == AppSource.UNKNOWN && !triggerReason.startsWith("empty-tree")) {
+        val monitoredWindowVisible = hasVisibleMonitoredWindow()
+        if (!monitoredWindowVisible && !triggerReason.startsWith("empty-tree")) {
+            Log.d(TAG, "OCR ignorado: nenhuma janela Uber/99 visível (trigger=$triggerReason, eventPkg=$packageName)")
             return false
         }
 

@@ -3,7 +3,10 @@ package com.example.motoristainteligente
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
+import android.content.res.ColorStateList
+import android.graphics.drawable.GradientDrawable
 import android.graphics.PixelFormat
 import android.os.Handler
 import android.os.IBinder
@@ -17,6 +20,7 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.Button
 import android.widget.TextView
 import java.util.Calendar
 import kotlin.math.roundToInt
@@ -35,15 +39,23 @@ class FloatingAnalyticsService : Service() {
         var instance: FloatingAnalyticsService? = null
         const val CHANNEL_ID = "motorista_inteligente_channel"
         const val ALERT_CHANNEL_ID = "motorista_inteligente_alerts"
+        const val NO_OFFERS_ALERT_CHANNEL_ID = "motorista_inteligente_no_offers_alerts"
         const val NOTIFICATION_ID = 1001
         const val ALERT_NOTIFICATION_ID_UPCOMING = 2001
         const val ALERT_NOTIFICATION_ID_DECLINING = 2002
+        const val ALERT_NOTIFICATION_ID_NO_OFFERS = 2003
         const val ACTION_STOP = "com.example.motoristainteligente.STOP_SERVICE"
         private const val RIDE_DEBOUNCE_MS = 300L // 300ms para agrupar eventos rápidos
         private const val NO_OFFERS_ALERT_WINDOW_MS = 15 * 60 * 1000L
+
+        // Tempo sem ofertas para sugerir que o motorista se mova 1km
+        private const val NO_OFFERS_IDLE_TIMEOUT_MS = 10 * 60 * 1000L  // 10 minutos
+        // Cooldown entre alertas de "sem ofertas" (não repetir em menos de 15 min)
+        private const val NO_OFFERS_ALERT_COOLDOWN_MS = 15 * 60 * 1000L
     }
 
     private lateinit var windowManager: WindowManager
+    private lateinit var analysisStatePrefs: SharedPreferences
     private lateinit var locationHelper: LocationHelper
     private lateinit var marketDataService: MarketDataService
     private lateinit var driverPreferences: DriverPreferences
@@ -61,6 +73,20 @@ class FloatingAnalyticsService : Service() {
     private var lastUpcomingAlertKey: String? = null
     private var lastDecliningAlertKey: String? = null
 
+    // Rastreamento de "sem ofertas por 10 min"
+    private var lastOfferReceivedAt = 0L   // timestamp da última oferta detectada
+    private var lastNoOffersAlertAt = 0L  // timestamp do último alerta enviado
+    private var analysisCardOffsetY = 135
+
+    private val analysisStateChangeListener =
+        SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+            updateFloatingButtonBorderState()
+            updateAnalysisCardBorderState()
+            if (isStatusCardVisible) {
+                populateStatusCard()
+            }
+        }
+
     private val handler = Handler(Looper.getMainLooper())
     private val hideCardRunnable = Runnable { hideAnalysisCard() }
     private val hideStatusCardRunnable = Runnable { hideStatusCard() }
@@ -70,6 +96,7 @@ class FloatingAnalyticsService : Service() {
         override fun run() {
             updateNotificationWithStats()
             maybeNotifyPeakEvents()
+            maybeNotifyNoOffers()
             handler.postDelayed(this, 60_000) // A cada 1 min
         }
     }
@@ -90,6 +117,8 @@ class FloatingAnalyticsService : Service() {
         super.onCreate()
         instance = this
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        analysisStatePrefs = getSharedPreferences("analysis_service_state", MODE_PRIVATE)
+        analysisStatePrefs.registerOnSharedPreferenceChangeListener(analysisStateChangeListener)
         locationHelper = LocationHelper(this)
         locationHelper.startLocationUpdates()
 
@@ -143,12 +172,19 @@ class FloatingAnalyticsService : Service() {
         }
 
         AnalysisServiceState.setEnabled(this, true)
+        if (!AnalysisServiceState.isPaused(this)) {
+            AnalysisServiceState.setPaused(this, false)
+        }
         if (onlineSessionStartMs == 0L) {
             onlineSessionStartMs = System.currentTimeMillis()
+            // Reinicia timers para evitar alerta imediato ao iniciar sessão
+            lastOfferReceivedAt = 0L
+            lastNoOffersAlertAt = 0L
         }
 
         createMainNotificationChannel(this, CHANNEL_ID)
         createPeakAlertsNotificationChannel(this, ALERT_CHANNEL_ID)
+        createNoOffersAlertNotificationChannel(this, NO_OFFERS_ALERT_CHANNEL_ID)
         startForeground(
             NOTIFICATION_ID,
             createForegroundNotification(this, CHANNEL_ID, ACTION_STOP, "Iniciando análise..."),
@@ -169,6 +205,7 @@ class FloatingAnalyticsService : Service() {
 
     override fun onDestroy() {
         instance = null
+        analysisStatePrefs.unregisterOnSharedPreferenceChangeListener(analysisStateChangeListener)
         // Salvar resumo da sessão no Firestore
         try {
             val stats = DemandTracker.getStats()
@@ -206,22 +243,11 @@ class FloatingAnalyticsService : Service() {
     private fun updateNotificationWithStats() {
         try {
             val manager = getSystemService(NotificationManager::class.java)
-
-            if (!firestoreManager.isGoogleUser) {
-                manager.notify(
-                    NOTIFICATION_ID,
-                    createForegroundNotification(this, CHANNEL_ID, ACTION_STOP, "Login necessário")
-                )
-                return
-            }
-
-            firestoreManager.loadTodayRideOfferStats { firebaseStats ->
-                val status = computeFirebaseDemandStatus(firebaseStats)
-                manager.notify(
-                    NOTIFICATION_ID,
-                    createForegroundNotification(this, CHANNEL_ID, ACTION_STOP, status.notificationLabel)
-                )
-            }
+            val peakSummary = buildPeakSummaryText()
+            manager.notify(
+                NOTIFICATION_ID,
+                createForegroundNotification(this, CHANNEL_ID, ACTION_STOP, peakSummary)
+            )
         } catch (_: Exception) { }
     }
 
@@ -238,6 +264,43 @@ class FloatingAnalyticsService : Service() {
             minute = now.get(Calendar.MINUTE),
             dayOfWeek = now.get(Calendar.DAY_OF_WEEK)
         )
+    }
+
+    private fun formatClockAfterMinutes(deltaMinutes: Int?): String {
+        if (deltaMinutes == null) return "—"
+        val cal = Calendar.getInstance()
+        cal.add(Calendar.MINUTE, deltaMinutes.coerceAtLeast(0))
+        return String.format("%02d:%02d", cal.get(Calendar.HOUR_OF_DAY), cal.get(Calendar.MINUTE))
+    }
+
+    private fun buildPeakSummaryText(): String {
+        val now = currentTimeInfo()
+        val city = resolveDriverCityForPeaks()
+        val signal = PauseAdvisor.getCityPeakWindowSignal(
+            cityName = city,
+            hour = now.hour,
+            minute = now.minute,
+            dayOfWeek = now.dayOfWeek
+        )
+
+        val leftLabel = if (signal.inPeakNow) "Atual" else "Último"
+        val leftRange = "${signal.currentOrLastStart}-${signal.currentOrLastEnd}"
+        val nextRange = "${signal.nextStart}-${signal.nextEnd}"
+
+        return "$leftLabel: $leftRange | Próximo: $nextRange"
+    }
+
+    private fun resolveDriverCityForPeaks(): String? {
+        val location = locationHelper.getCurrentLocation()
+        if (location != null) {
+            try {
+                val resolved = resolveRegionFromCoordinates(this, location.latitude, location.longitude)
+                val city = resolved?.city?.trim().orEmpty()
+                if (city.isNotBlank()) return city
+            } catch (_: Exception) {
+            }
+        }
+        return lastResolvedCity ?: marketDataService.getLastMarketInfo()?.regionName
     }
 
     private fun maybeNotifyPeakEvents() {
@@ -289,6 +352,39 @@ class FloatingAnalyticsService : Service() {
         }
     }
 
+    private fun maybeNotifyNoOffers() {
+        try {
+            // Só executa se a sessão online estiver ativa
+            if (onlineSessionStartMs == 0L) return
+            if (!AnalysisServiceState.isEnabled(this)) return
+
+            val now = System.currentTimeMillis()
+
+            // Na primeira execução após ir online, inicializa o timer (evita alerta imediato)
+            if (lastOfferReceivedAt == 0L) {
+                lastOfferReceivedAt = now
+                return
+            }
+
+            val idleMs = now - lastOfferReceivedAt
+            if (idleMs < NO_OFFERS_IDLE_TIMEOUT_MS) return  // Ainda dentro dos 10 min
+
+            // Cooldown: não repetir dentro de 15 min
+            if (lastNoOffersAlertAt > 0L && now - lastNoOffersAlertAt < NO_OFFERS_ALERT_COOLDOWN_MS) return
+
+            val idleMinutes = idleMs / 60_000
+            lastNoOffersAlertAt = now
+            sendHighPriorityAlertNotification(
+                service = this,
+                channelId = NO_OFFERS_ALERT_CHANNEL_ID,
+                id = ALERT_NOTIFICATION_ID_NO_OFFERS,
+                title = "Sem ofertas há ${idleMinutes} min",
+                message = "Tente se deslocar ~1 km para aumentar suas chances de receber corridas."
+            )
+        } catch (_: Exception) {
+        }
+    }
+
     /**
      * Atualiza a localização do motorista no Firebase a cada 15 min.
      * Usa Geocoder para resolver cidade/bairro a partir das coordenadas GPS.
@@ -330,6 +426,7 @@ class FloatingAnalyticsService : Service() {
 
         val inflater = LayoutInflater.from(this)
         floatingButton = inflater.inflate(R.layout.layout_floating_button, null)
+        updateFloatingButtonBorderState()
 
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -444,8 +541,16 @@ class FloatingAnalyticsService : Service() {
      * Usa debounce: se múltiplas chamadas chegam em rajada, só a ÚLTIMA é processada.
      */
     fun onRideDetected(rideData: RideData) {
+        if (AnalysisServiceState.isPaused(this)) {
+            Log.i("FloatingAnalytics", ">>> Análise pausada: corrida ignorada")
+            return
+        }
+
         // Cancelar processamento anterior pendente
         pendingRideRunnable?.let { handler.removeCallbacks(it) }
+
+        // Registrar recebimento de oferta — zera o contador de "sem ofertas"
+        lastOfferReceivedAt = System.currentTimeMillis()
 
         val runnable = Runnable {
             Log.i(
@@ -482,8 +587,21 @@ class FloatingAnalyticsService : Service() {
                 )
             }
 
-            val city = processingResult.city
-            val neighborhood = processingResult.neighborhood
+            var city = processingResult.city
+            var neighborhood = processingResult.neighborhood
+
+            if (city.isNullOrBlank() && location != null) {
+                try {
+                    val resolvedByCurrentLocation = resolveRegionFromCoordinates(this, location.latitude, location.longitude)
+                    city = resolvedByCurrentLocation?.city ?: city
+                    neighborhood = resolvedByCurrentLocation?.neighborhood ?: neighborhood
+                    if (!city.isNullOrBlank()) {
+                        Log.i("FloatingAnalytics", "Fallback de localização atual aplicado na oferta: $city / $neighborhood")
+                    }
+                } catch (e: Exception) {
+                    Log.w("FloatingAnalytics", "Falha no fallback de localização atual da oferta", e)
+                }
+            }
 
             if (!city.isNullOrBlank()) {
                 lastResolvedCity = city
@@ -635,108 +753,33 @@ class FloatingAnalyticsService : Service() {
 
     private fun populateStatusCard() {
         val card = statusCard ?: return
-        val stats = DemandTracker.getStats()
-        val location = locationHelper.getCurrentLocation()
-        val marketInfo = marketDataService.getLastMarketInfo()
-        val pauseRec = PauseAdvisor.analyze(stats, location, marketInfo)
-        val now = currentTimeInfo()
-        val hour = now.hour
 
         bindStatusCardCloseAction(card) { hideStatusCard() }
-        bindStatusCardSessionTime(card, stats.sessionDurationMin.toInt())
+        val sessionMin = DemandTracker.getStats().sessionDurationMin.toInt()
+        bindStatusCardSessionTime(card, sessionMin)
 
-        val isGoogleLoggedIn = firestoreManager.isGoogleUser
-        if (!isGoogleLoggedIn) {
-            bindStatusCardLoggedOutState(card)
-            return
-        }
+        val paused = AnalysisServiceState.isPaused(this)
+        val pauseButton = card.findViewById<Button>(R.id.btnPauseAnalysis)
+        val pauseHint = card.findViewById<TextView>(R.id.tvPauseStateHint)
 
-        // Demanda: baseada na comparação hora-a-hora
-        firestoreManager.loadTodayRideOfferStats { firebaseStats ->
-            val demandStatus = computeFirebaseDemandStatus(firebaseStats)
-            val offersLast1h = firebaseStats.offersLast1h
-
-            bindStatusCardDemandLevel(card, demandStatus.cardLabel, demandStatus.color)
-
-            val noRecentOffers = firebaseStats.lastOfferTimestamp <= 0L ||
-                (System.currentTimeMillis() - firebaseStats.lastOfferTimestamp) > NO_OFFERS_ALERT_WINDOW_MS
-            bindStatusCardNoOffersAlert(card, noRecentOffers)
-
-            val total = firebaseStats.totalOffersToday.coerceAtLeast(1)
-            val uberPerHour = (offersLast1h * (firebaseStats.offersUber.toDouble() / total.toDouble())).roundToInt()
-            val ninetyNinePerHour = (offersLast1h * (firebaseStats.offers99.toDouble() / total.toDouble())).roundToInt()
-            bindStatusCardDemandMetrics(card, firebaseStats, uberPerHour, ninetyNinePerHour)
-        }
-
-        // Verificar horários de baixa demanda (9h-11:30 e 14:30-16:30)
-        val timeInMinutes = hour * 60 + now.minute
-        val isLowDemandHour = (timeInMinutes in 540..690) || (timeInMinutes in 870..990)
-
-        val detectedCity = lastResolvedCity ?: marketInfo?.regionName
-        val cityGuidance = PauseAdvisor.getCityPeakGuidance(
-            cityName = detectedCity,
-            hour = hour,
-            minute = now.minute,
-            dayOfWeek = now.dayOfWeek
-        )
-
-        // Texto principal do rodapé
-        val mainReason = pauseRec.reasons.firstOrNull()?.replace(Regex("[^\\p{L}\\p{M}\\p{N}\\p{P}\\p{Sc}\\s]"), "")?.trim() ?: ""
-        val advice: String
-        val reason: String
-        if (cityGuidance.shouldPauseNow && !cityGuidance.inPeakNow) {
-            advice = "PAUSA ESTRATÉGICA"
-            reason = "Retorne no próximo pico"
-        } else if (isLowDemandHour) {
-            advice = "GUARDE O CARRO"
-            reason = "Baixa demanda agora"
-        } else if (stats.acceptedBelowAverage) {
-            advice = "ACEITE CORRIDAS MELHORES"
-            reason = "Selecione melhor por km"
-        } else if (pauseRec.shouldPause) {
-            advice = "PAUSAR AGORA"
-            reason = mainReason
+        pauseButton.text = if (paused) "Ativar análise" else "Pausar análise"
+        val buttonColor = if (paused) 0xFF757575.toInt() else 0xFF4CAF50.toInt()
+        pauseButton.backgroundTintList = ColorStateList.valueOf(buttonColor)
+        val baseHint = if (paused) {
+            "Análise pausada. Toque para voltar a analisar corridas."
         } else {
-            advice = mainReason.ifEmpty { "Janela favorável" }
-            reason = ""
+            "Análise ativa. Toque para pausar sem fechar o app."
         }
+        pauseHint.text = "$baseHint\n${buildPeakSummaryText()}"
 
-        // Localização do motorista
-        val regionName = marketInfo?.regionName ?: "Desconhecida"
-
-        val compactPeak = cityGuidance.nextPeakText
-            .replace("Próximo pico:", "", ignoreCase = true)
-            .trim()
-        val peakNext = "Pico: ${compactPeak.ifBlank { "—" }}"
-
-        val compactTip = cityGuidance.tipText
-            .substringBefore('.')
-            .trim()
-            .take(64)
-
-        // Cor do fundo baseado na demanda hora-a-hora
-        val backgroundRes = when {
-            isLowDemandHour ->
-                R.drawable.bg_card_bad
-            stats.acceptedBelowAverage ->
-                R.drawable.bg_card_neutral
-            stats.ridesLastHour < stats.ridesPreviousHour -> // Demanda caindo
-                R.drawable.bg_card_bad
-            stats.ridesLastHour > stats.ridesPreviousHour || stats.trend == DemandTracker.DemandTrend.RISING -> // Subindo
-                R.drawable.bg_card_good
-            else -> // Estável
-                R.drawable.bg_card_neutral
+        pauseButton.setOnClickListener {
+            val newPaused = !AnalysisServiceState.isPaused(this)
+            AnalysisServiceState.setPaused(this, newPaused)
+            populateStatusCard()
+            updateFloatingButtonBorderState()
+            updateAnalysisCardBorderState()
+            updateNotificationWithStats()
         }
-
-        bindStatusCardFooter(
-            card = card,
-            advice = advice,
-            reason = reason,
-            location = regionName,
-            peakNext = peakNext,
-            peakTip = compactTip,
-            backgroundRes = backgroundRes
-        )
 
     }
 
@@ -825,8 +868,10 @@ class FloatingAnalyticsService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            y = 135
+            y = analysisCardOffsetY
         }
+
+        analysisCard?.let { setupAnalysisCardVerticalDrag(it, params) }
 
         try {
             windowManager.addView(analysisCard, params)
@@ -855,6 +900,7 @@ class FloatingAnalyticsService : Service() {
 
     private fun populateCard(analysis: RideAnalysis) {
         val card = analysisCard ?: return
+        updateAnalysisCardBorderState()
 
         val pickupDistance = analysis.pickupDistanceKm
         val totalDistanceKm = (analysis.rideData.distanceKm + pickupDistance).coerceAtLeast(0.1)
@@ -868,6 +914,30 @@ class FloatingAnalyticsService : Service() {
         bindRideAnalysisCard(card, analysis) {
             hideAnalysisCard()
         }
+    }
+
+    private fun updateAnalysisCardBorderState() {
+        val card = analysisCard ?: return
+        val drawable = card.background as? GradientDrawable ?: return
+
+        val isActive = AnalysisServiceState.isEnabled(this) && !AnalysisServiceState.isPaused(this)
+        val borderColor = if (isActive) 0xFF4CAF50.toInt() else 0xFFF44336.toInt()
+        val strokeWidthPx = (1 * resources.displayMetrics.density).toInt().coerceAtLeast(1)
+
+        val mutableDrawable = drawable.mutate() as? GradientDrawable ?: return
+        mutableDrawable.setStroke(strokeWidthPx, borderColor)
+    }
+
+    private fun updateFloatingButtonBorderState() {
+        val button = floatingButton ?: return
+        val drawable = button.background as? GradientDrawable ?: return
+
+        val isActive = AnalysisServiceState.isEnabled(this) && !AnalysisServiceState.isPaused(this)
+        val borderColor = if (isActive) 0xFF4CAF50.toInt() else 0xFFF44336.toInt()
+        val strokeWidthPx = (2 * resources.displayMetrics.density).toInt().coerceAtLeast(1)
+
+        val mutableDrawable = drawable.mutate() as? GradientDrawable ?: return
+        mutableDrawable.setStroke(strokeWidthPx, borderColor)
     }
 
     private fun hideAnalysisCard() {
@@ -887,5 +957,60 @@ class FloatingAnalyticsService : Service() {
         }
         analysisCard = null
         isCardVisible = false
+    }
+
+    private fun setupAnalysisCardVerticalDrag(card: View, params: WindowManager.LayoutParams) {
+        val closeButton = card.findViewById<View>(R.id.btnClose)
+        var initialY = 0
+        var initialTouchY = 0f
+        var dragging = false
+
+        card.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    if (isPointInsideView(card, closeButton, event.rawX, event.rawY)) {
+                        return@setOnTouchListener false
+                    }
+                    initialY = params.y
+                    initialTouchY = event.rawY
+                    dragging = false
+                    true
+                }
+
+                MotionEvent.ACTION_MOVE -> {
+                    val dy = (event.rawY - initialTouchY).toInt()
+                    if (!dragging && kotlin.math.abs(dy) > 8) dragging = true
+                    if (dragging) {
+                        val screenHeight = resources.displayMetrics.heightPixels
+                        val maxY = (screenHeight - card.height).coerceAtLeast(140)
+                        params.y = (initialY + dy).coerceIn(80, maxY)
+                        analysisCardOffsetY = params.y
+                        try {
+                            windowManager.updateViewLayout(card, params)
+                        } catch (_: Exception) {
+                        }
+                    }
+                    true
+                }
+
+                MotionEvent.ACTION_UP,
+                MotionEvent.ACTION_CANCEL -> dragging
+
+                else -> false
+            }
+        }
+    }
+
+    private fun isPointInsideView(parent: View, child: View?, rawX: Float, rawY: Float): Boolean {
+        child ?: return false
+        val parentLocation = IntArray(2)
+        parent.getLocationOnScreen(parentLocation)
+
+        val left = parentLocation[0] + child.left
+        val top = parentLocation[1] + child.top
+        val right = left + child.width
+        val bottom = top + child.height
+
+        return rawX >= left && rawX <= right && rawY >= top && rawY <= bottom
     }
 }
