@@ -7,6 +7,7 @@ import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
 import android.content.res.ColorStateList
 import android.graphics.drawable.GradientDrawable
+import androidx.core.content.ContextCompat
 import android.graphics.PixelFormat
 import android.os.Handler
 import android.os.IBinder
@@ -17,7 +18,9 @@ import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.Button
@@ -38,20 +41,24 @@ class FloatingAnalyticsService : Service() {
     companion object {
         var instance: FloatingAnalyticsService? = null
         const val CHANNEL_ID = "motorista_inteligente_channel"
-        const val ALERT_CHANNEL_ID = "motorista_inteligente_alerts"
-        const val NO_OFFERS_ALERT_CHANNEL_ID = "motorista_inteligente_no_offers_alerts"
+        const val ALERT_CHANNEL_ID = "motorista_inteligente_alerts_v2"
+        const val NO_OFFERS_ALERT_CHANNEL_ID = "motorista_inteligente_no_offers_alerts_v2"
         const val NOTIFICATION_ID = 1001
         const val ALERT_NOTIFICATION_ID_UPCOMING = 2001
         const val ALERT_NOTIFICATION_ID_DECLINING = 2002
         const val ALERT_NOTIFICATION_ID_NO_OFFERS = 2003
+        const val ALERT_NOTIFICATION_ID_STRATEGIC_PAUSE = 2004
         const val ACTION_STOP = "com.example.motoristainteligente.STOP_SERVICE"
         private const val RIDE_DEBOUNCE_MS = 300L // 300ms para agrupar eventos rápidos
+        private const val FIREBASE_OFFER_SAVE_DELAY_MS = 5_000L
         private const val NO_OFFERS_ALERT_WINDOW_MS = 15 * 60 * 1000L
 
         // Tempo sem ofertas para sugerir que o motorista se mova 1km
         private const val NO_OFFERS_IDLE_TIMEOUT_MS = 10 * 60 * 1000L  // 10 minutos
         // Cooldown entre alertas de "sem ofertas" (não repetir em menos de 15 min)
         private const val NO_OFFERS_ALERT_COOLDOWN_MS = 15 * 60 * 1000L
+        private const val OFF_PEAK_ALERT_COOLDOWN_MS = 30 * 60 * 1000L
+        private const val FLOATING_DRAG_SAFE_MARGIN_DP = 18
     }
 
     private lateinit var windowManager: WindowManager
@@ -65,6 +72,11 @@ class FloatingAnalyticsService : Service() {
     private var analysisCard: View? = null
     private var statusCard: View? = null
     private var statusCardOverlay: View? = null
+    private var quickPauseButton: Button? = null
+    private var quickPauseOverlay: View? = null
+    private var dragCloseTarget: View? = null
+    private var isDragCloseTargetHighlighted = false
+    private var isFloatingButtonMagnetized = false
     private var isCardVisible = false
     private var isStatusCardVisible = false
     private var onlineSessionStartMs: Long = 0L
@@ -76,12 +88,24 @@ class FloatingAnalyticsService : Service() {
     // Rastreamento de "sem ofertas por 10 min"
     private var lastOfferReceivedAt = 0L   // timestamp da última oferta detectada
     private var lastNoOffersAlertAt = 0L  // timestamp do último alerta enviado
+    private var lastOffPeakAlertAt = 0L
     private var analysisCardOffsetY = 135
 
     private val analysisStateChangeListener =
         SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
             updateFloatingButtonBorderState()
             updateAnalysisCardBorderState()
+            updateQuickPauseButtonState()
+            if (AnalysisServiceState.isPaused(this)) {
+                if (::firestoreManager.isInitialized) {
+                    firestoreManager.removeDriverLocation()
+                }
+                clearDemandAlertNotifications()
+            } else if (AnalysisServiceState.isEnabled(this)) {
+                if (::firestoreManager.isInitialized) {
+                    updateDriverLocationInFirebase()
+                }
+            }
             if (isStatusCardVisible) {
                 populateStatusCard()
             }
@@ -97,6 +121,7 @@ class FloatingAnalyticsService : Service() {
             updateNotificationWithStats()
             maybeNotifyPeakEvents()
             maybeNotifyNoOffers()
+            maybeNotifyStrategicPauseOutsidePeak()
             handler.postDelayed(this, 60_000) // A cada 1 min
         }
     }
@@ -227,6 +252,8 @@ class FloatingAnalyticsService : Service() {
         locationHelper.stopLocationUpdates()
         marketDataService.stop()
         removeFloatingButton()
+        hideQuickPauseButton()
+        hideDragCloseTarget()
         hideAnalysisCard()
         hideStatusCard()
         handler.removeCallbacksAndMessages(null)
@@ -303,8 +330,56 @@ class FloatingAnalyticsService : Service() {
         return lastResolvedCity ?: marketDataService.getLastMarketInfo()?.regionName
     }
 
+    private fun maybeNotifyStrategicPauseOutsidePeak() {
+        try {
+            if (onlineSessionStartMs == 0L) return
+            if (!AnalysisServiceState.isEnabled(this)) return
+            if (AnalysisServiceState.isPaused(this)) return
+
+            val nowMs = System.currentTimeMillis()
+            if (lastOffPeakAlertAt > 0L && nowMs - lastOffPeakAlertAt < OFF_PEAK_ALERT_COOLDOWN_MS) return
+
+            val now = currentTimeInfo()
+            val city = resolveDriverCityForPeaks()
+            val signal = PauseAdvisor.getCityPeakSignal(
+                cityName = city,
+                hour = now.hour,
+                minute = now.minute,
+                dayOfWeek = now.dayOfWeek
+            )
+            val windowSignal = PauseAdvisor.getCityPeakWindowSignal(
+                cityName = city,
+                hour = now.hour,
+                minute = now.minute,
+                dayOfWeek = now.dayOfWeek
+            )
+
+            if (!signal.supportedCity || city.isNullOrBlank()) return
+            if (signal.inPeakNow) return
+            if (!windowSignal.supportedCity) return
+            if (windowSignal.nextStart == "—" || windowSignal.nextEnd == "—") return
+
+            val minutesToNextPeak = signal.minutesToNextPeak
+            if (minutesToNextPeak != null && minutesToNextPeak in 1..20) return
+
+            lastOffPeakAlertAt = nowMs
+            val nextPeakText = "Próximo pico da sua região: ${windowSignal.nextStart}-${windowSignal.nextEnd}."
+
+            sendPeakAlertNotification(
+                service = this,
+                channelId = ALERT_CHANNEL_ID,
+                id = ALERT_NOTIFICATION_ID_STRATEGIC_PAUSE,
+                title = "Fora do pico no momento",
+                message = "${city.trim()}: demanda tende a ficar mais fraca agora. $nextPeakText"
+            )
+        } catch (_: Exception) {
+        }
+    }
+
     private fun maybeNotifyPeakEvents() {
         try {
+            if (AnalysisServiceState.isPaused(this)) return
+
             val now = currentTimeInfo()
 
             val city = lastResolvedCity ?: marketDataService.getLastMarketInfo()?.regionName
@@ -357,6 +432,7 @@ class FloatingAnalyticsService : Service() {
             // Só executa se a sessão online estiver ativa
             if (onlineSessionStartMs == 0L) return
             if (!AnalysisServiceState.isEnabled(this)) return
+            if (AnalysisServiceState.isPaused(this)) return
 
             val now = System.currentTimeMillis()
 
@@ -372,15 +448,25 @@ class FloatingAnalyticsService : Service() {
             // Cooldown: não repetir dentro de 15 min
             if (lastNoOffersAlertAt > 0L && now - lastNoOffersAlertAt < NO_OFFERS_ALERT_COOLDOWN_MS) return
 
-            val idleMinutes = idleMs / 60_000
             lastNoOffersAlertAt = now
             sendHighPriorityAlertNotification(
                 service = this,
                 channelId = NO_OFFERS_ALERT_CHANNEL_ID,
                 id = ALERT_NOTIFICATION_ID_NO_OFFERS,
-                title = "Sem ofertas há ${idleMinutes} min",
-                message = "Tente se deslocar ~1 km para aumentar suas chances de receber corridas."
+                title = "Sem demanda há 10 min",
+                message = "Você está online sem ofertas. Faça uma pausa estratégica de 10-15 min ou se desloque ~1 km para melhorar a chance de corridas."
             )
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun clearDemandAlertNotifications() {
+        try {
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.cancel(ALERT_NOTIFICATION_ID_UPCOMING)
+            manager.cancel(ALERT_NOTIFICATION_ID_DECLINING)
+            manager.cancel(ALERT_NOTIFICATION_ID_NO_OFFERS)
+            manager.cancel(ALERT_NOTIFICATION_ID_STRATEGIC_PAUSE)
         } catch (_: Exception) {
         }
     }
@@ -436,7 +522,7 @@ class FloatingAnalyticsService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = 0
+            x = dpToPx(FLOATING_DRAG_SAFE_MARGIN_DP)
             y = 300
         }
 
@@ -459,12 +545,14 @@ class FloatingAnalyticsService : Service() {
             } catch (_: Exception) { }
         }
         floatingButton = null
+        hideQuickPauseButton()
+        hideDragCloseTarget()
     }
 
     /**
      * Configura o botão flutuante com arrastar + toque e toque longo.
      * Toque curto: mostra/oculta card de análise
-     * Toque longo: mostra card de status com demanda e pausa
+     * Toque longo: mostra botão rápido de pausar/ativar análise
      */
     private fun setupDraggableWithLongPress(view: View, params: WindowManager.LayoutParams) {
         var initialX = 0
@@ -473,15 +561,17 @@ class FloatingAnalyticsService : Service() {
         var initialTouchY = 0f
         var isClick = true
         var longPressTriggered = false
+        var isDragging = false
 
         val longPressRunnable = Runnable {
             longPressTriggered = true
             // Vibrar feedback
             view.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
-            showStatusCard()
+            hideStatusCard()
+            showQuickPauseButton(params.x, params.y)
         }
 
-        view.setOnTouchListener { v, event ->
+        view.setOnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
                     initialX = params.x
@@ -490,6 +580,7 @@ class FloatingAnalyticsService : Service() {
                     initialTouchY = event.rawY
                     isClick = true
                     longPressTriggered = false
+                    isDragging = false
                     handler.postDelayed(longPressRunnable, 600)
                     true
                 }
@@ -498,10 +589,31 @@ class FloatingAnalyticsService : Service() {
                     val dy = event.rawY - initialTouchY
                     if (dx * dx + dy * dy > 100) {
                         isClick = false
+                        isDragging = true
                         handler.removeCallbacks(longPressRunnable)
+                        hideQuickPauseButton()
+                        showDragCloseTarget()
                     }
-                    params.x = initialX + dx.toInt()
-                    params.y = initialY + dy.toInt()
+                    val safeMargin = dpToPx(FLOATING_DRAG_SAFE_MARGIN_DP)
+                    val screenWidth = resources.displayMetrics.widthPixels
+                    val screenHeight = resources.displayMetrics.heightPixels
+                    val viewWidth = view.width.takeIf { it > 0 } ?: dpToPx(76)
+                    val viewHeight = view.height.takeIf { it > 0 } ?: dpToPx(76)
+
+                    val minX = safeMargin
+                    val maxX = (screenWidth - viewWidth - safeMargin).coerceAtLeast(minX)
+                    val minY = safeMargin
+                    val maxY = (screenHeight - viewHeight - safeMargin).coerceAtLeast(minY)
+
+                    params.x = (initialX + dx.toInt()).coerceIn(minX, maxX)
+                    params.y = (initialY + dy.toInt()).coerceIn(minY, maxY)
+
+                    if (isDragging) {
+                        val isOverCloseTarget = isPointOverDragCloseTarget(event.rawX, event.rawY)
+                        updateDragCloseTargetHighlight(isOverCloseTarget)
+                        updateFloatingButtonMagnetState(view, isOverCloseTarget)
+                    }
+
                     try {
                         windowManager.updateViewLayout(view, params)
                     } catch (_: Exception) { }
@@ -509,6 +621,17 @@ class FloatingAnalyticsService : Service() {
                 }
                 MotionEvent.ACTION_UP -> {
                     handler.removeCallbacks(longPressRunnable)
+
+                    val droppedOnClose = isDragging && isPointOverDragCloseTarget(event.rawX, event.rawY)
+                    updateFloatingButtonMagnetState(view, false)
+                    hideDragCloseTarget()
+
+                    if (droppedOnClose) {
+                        view.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+                        stopAnalysisFromDragCloseTarget(view)
+                        return@setOnTouchListener true
+                    }
+
                     if (isClick && !longPressTriggered) {
                         if (isStatusCardVisible) {
                             hideStatusCard()
@@ -528,6 +651,224 @@ class FloatingAnalyticsService : Service() {
             }
         }
     }
+
+    private fun updateFloatingButtonMagnetState(buttonView: View, isOverCloseTarget: Boolean) {
+        if (isFloatingButtonMagnetized == isOverCloseTarget) return
+        isFloatingButtonMagnetized = isOverCloseTarget
+
+        if (isOverCloseTarget) {
+            buttonView.animate()
+                .scaleX(0.86f)
+                .scaleY(0.86f)
+                .alpha(0.82f)
+                .setDuration(120)
+                .start()
+        } else {
+            buttonView.animate()
+                .scaleX(1f)
+                .scaleY(1f)
+                .alpha(1f)
+                .setDuration(120)
+                .start()
+        }
+    }
+
+    private fun showQuickPauseButton(anchorX: Int, anchorY: Int) {
+        if (dragCloseTarget != null) return
+        hideQuickPauseButton()
+
+        quickPauseOverlay = View(this).apply {
+            setBackgroundColor(0x01000000)
+            setOnClickListener { hideQuickPauseButton() }
+        }
+
+        val overlayParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT
+        )
+
+        val quickButtonSize = dpToPx(56)
+        val floatingSize = floatingButton?.width?.takeIf { it > 0 } ?: dpToPx(76)
+        val horizontalGap = dpToPx(10)
+        val screenWidth = resources.displayMetrics.widthPixels
+        val screenHeight = resources.displayMetrics.heightPixels
+        val safeMargin = dpToPx(8)
+
+        val openToRight = (anchorX + (floatingSize / 2)) < (screenWidth / 2)
+        val rawX = if (openToRight) {
+            anchorX + floatingSize + horizontalGap
+        } else {
+            anchorX - quickButtonSize - horizontalGap
+        }
+        val rawY = anchorY + ((floatingSize - quickButtonSize) / 2)
+
+        val finalX = rawX.coerceIn(safeMargin, (screenWidth - quickButtonSize - safeMargin).coerceAtLeast(safeMargin))
+        val finalY = rawY.coerceIn(safeMargin, (screenHeight - quickButtonSize - safeMargin).coerceAtLeast(safeMargin))
+
+        quickPauseButton = Button(this).apply {
+            setAllCaps(false)
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 22f
+            setPadding(0, 0, 0, 0)
+            minWidth = 0
+            minimumWidth = 0
+            minHeight = 0
+            minimumHeight = 0
+            setOnClickListener {
+                val newPaused = !AnalysisServiceState.isPaused(this@FloatingAnalyticsService)
+                AnalysisServiceState.setPaused(this@FloatingAnalyticsService, newPaused)
+                updateNotificationWithStats()
+                hideQuickPauseButton()
+            }
+        }
+        updateQuickPauseButtonState()
+
+        val buttonParams = WindowManager.LayoutParams(
+            quickButtonSize,
+            quickButtonSize,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = finalX
+            y = finalY
+        }
+
+        try {
+            windowManager.addView(quickPauseOverlay, overlayParams)
+            windowManager.addView(quickPauseButton, buttonParams)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun updateQuickPauseButtonState() {
+        val button = quickPauseButton ?: return
+        val paused = AnalysisServiceState.isPaused(this)
+        button.text = if (paused) "▶" else "⏸"
+        val buttonColor = if (paused) 0xFF757575.toInt() else 0xFF4CAF50.toInt()
+        button.backgroundTintList = ColorStateList.valueOf(buttonColor)
+    }
+
+    private fun hideQuickPauseButton() {
+        quickPauseButton?.let {
+            try { windowManager.removeView(it) } catch (_: Exception) { }
+        }
+        quickPauseButton = null
+
+        quickPauseOverlay?.let {
+            try { windowManager.removeView(it) } catch (_: Exception) { }
+        }
+        quickPauseOverlay = null
+    }
+
+    private fun showDragCloseTarget() {
+        if (dragCloseTarget != null) return
+
+        quickPauseButton?.isEnabled = false
+        hideQuickPauseButton()
+
+        val container = FrameLayout(this).apply {
+            layoutParams = ViewGroup.LayoutParams(dpToPx(88), dpToPx(88))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(0x22F44336)
+                setStroke(dpToPx(2), 0xAAF44336.toInt())
+            }
+            alpha = 0.85f
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        }
+
+        val closeText = TextView(this).apply {
+            text = "✕"
+            textSize = 30f
+            setTextColor(0xFFF44336.toInt())
+            gravity = Gravity.CENTER
+        }
+
+        container.addView(
+            closeText,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        val params = WindowManager.LayoutParams(
+            dpToPx(88),
+            dpToPx(88),
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            y = dpToPx(36)
+        }
+
+        try {
+            windowManager.addView(container, params)
+            dragCloseTarget = container
+            isDragCloseTargetHighlighted = false
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun updateDragCloseTargetHighlight(isOver: Boolean) {
+        if (isDragCloseTargetHighlighted == isOver) return
+        isDragCloseTargetHighlighted = isOver
+
+        val target = dragCloseTarget as? FrameLayout ?: return
+        val bg = target.background as? GradientDrawable ?: return
+
+        if (isOver) {
+            bg.setColor(0x44F44336)
+            bg.setStroke(dpToPx(3), 0xFFF44336.toInt())
+        } else {
+            bg.setColor(0x22F44336)
+            bg.setStroke(dpToPx(2), 0xAAF44336.toInt())
+        }
+    }
+
+    private fun isPointOverDragCloseTarget(rawX: Float, rawY: Float): Boolean {
+        val target = dragCloseTarget ?: return false
+        val location = IntArray(2)
+        target.getLocationOnScreen(location)
+        val left = location[0]
+        val top = location[1]
+        val right = left + target.width
+        val bottom = top + target.height
+        return rawX >= left && rawX <= right && rawY >= top && rawY <= bottom
+    }
+
+    private fun hideDragCloseTarget() {
+        dragCloseTarget?.let {
+            try { windowManager.removeView(it) } catch (_: Exception) { }
+        }
+        dragCloseTarget = null
+        isDragCloseTargetHighlighted = false
+        isFloatingButtonMagnetized = false
+        quickPauseButton?.isEnabled = true
+    }
+
+    private fun stopAnalysisFromDragCloseTarget(buttonView: View) {
+        buttonView.animate()
+            .scaleX(0.35f)
+            .scaleY(0.35f)
+            .alpha(0f)
+            .setDuration(140)
+            .withEndAction {
+                AnalysisServiceState.setPaused(this, false)
+                AnalysisServiceState.setEnabled(this, false)
+                stopSelf()
+            }
+            .start()
+    }
+
+    private fun dpToPx(dp: Int): Int = (dp * resources.displayMetrics.density).roundToInt()
 
     // ========================
     // Ride Analysis Card
@@ -612,9 +953,6 @@ class FloatingAnalyticsService : Service() {
                 Log.w("FloatingAnalytics", "Oferta detectada sem cidade resolvida — demanda regional pode não contabilizar")
             }
 
-            // Salvar oferta no Firebase para base de cálculo de demanda
-            firestoreManager.saveRideOffer(rideData, city, neighborhood)
-
             // Pulsar o botão flutuante para indicar nova corrida
             animateFloatingButtonPulse(floatingButton)
 
@@ -624,6 +962,14 @@ class FloatingAnalyticsService : Service() {
 
             showAnalysisCard(analysis)
 
+            scheduleOfferSaveToFirebase(
+                rideData = rideData,
+                city = city,
+                neighborhood = neighborhood,
+                gpsLatitude = location?.latitude,
+                gpsLongitude = location?.longitude
+            )
+
             // Atualizar notificação com stats atualizados
             updateNotificationWithStats()
 
@@ -632,6 +978,25 @@ class FloatingAnalyticsService : Service() {
         }
         pendingRideRunnable = runnable
         handler.postDelayed(runnable, RIDE_DEBOUNCE_MS)
+    }
+
+    private fun scheduleOfferSaveToFirebase(
+        rideData: RideData,
+        city: String?,
+        neighborhood: String?,
+        gpsLatitude: Double?,
+        gpsLongitude: Double?
+    ) {
+        val saveRunnable = Runnable {
+            firestoreManager.saveRideOffer(
+                rideData = rideData,
+                city = city,
+                neighborhood = neighborhood,
+                gpsLatitude = gpsLatitude,
+                gpsLongitude = gpsLongitude
+            )
+        }
+        handler.postDelayed(saveRunnable, FIREBASE_OFFER_SAVE_DELAY_MS)
     }
 
     /**
@@ -759,22 +1124,51 @@ class FloatingAnalyticsService : Service() {
         bindStatusCardSessionTime(card, sessionMin)
 
         val paused = AnalysisServiceState.isPaused(this)
-        val pauseButton = card.findViewById<Button>(R.id.btnPauseAnalysis)
-        val pauseHint = card.findViewById<TextView>(R.id.tvPauseStateHint)
+        val activateButton = card.findViewById<ImageButton>(R.id.btnActivateAnalysis)
+        val pauseButton = card.findViewById<ImageButton>(R.id.btnPauseAnalysis)
 
-        pauseButton.text = if (paused) "Ativar análise" else "Pausar análise"
-        val buttonColor = if (paused) 0xFF757575.toInt() else 0xFF4CAF50.toInt()
-        pauseButton.backgroundTintList = ColorStateList.valueOf(buttonColor)
-        val baseHint = if (paused) {
-            "Análise pausada. Toque para voltar a analisar corridas."
-        } else {
-            "Análise ativa. Toque para pausar sem fechar o app."
+        val enabledColor = 0xFF4CAF50.toInt()
+        val disabledColor = 0xFF757575.toInt()
+        val strokeActive = 0xFF81C784.toInt()
+        val strokeInactive = 0xFF9E9E9E.toInt()
+
+        fun buildPillDrawable(fillColor: Int, strokeColor: Int): GradientDrawable {
+            return GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dpToPx(20).toFloat()
+                setColor(fillColor)
+                setStroke(dpToPx(1), strokeColor)
+            }
         }
-        pauseHint.text = "$baseHint\n${buildPeakSummaryText()}"
+
+        activateButton.setImageResource(R.drawable.ic_power_settings_new_24)
+        activateButton.setColorFilter(0xFFFFFFFF.toInt())
+        activateButton.background = buildPillDrawable(
+            fillColor = if (paused) enabledColor else disabledColor,
+            strokeColor = if (paused) strokeActive else strokeInactive
+        )
+        activateButton.isEnabled = paused
+        activateButton.contentDescription = if (paused) "Ativar análise" else "Análise ativa"
+
+        pauseButton.setImageResource(if (paused) R.drawable.ic_play_arrow_24 else R.drawable.ic_pause_24)
+        pauseButton.setColorFilter(0xFFFFFFFF.toInt())
+        pauseButton.background = buildPillDrawable(
+            fillColor = if (paused) disabledColor else enabledColor,
+            strokeColor = if (paused) strokeInactive else strokeActive
+        )
+        pauseButton.isEnabled = true
+        pauseButton.contentDescription = if (paused) "Retomar análise" else "Pausar análise"
+
+        activateButton.setOnClickListener {
+            AnalysisServiceState.setPaused(this, false)
+            populateStatusCard()
+            updateFloatingButtonBorderState()
+            updateAnalysisCardBorderState()
+            updateNotificationWithStats()
+        }
 
         pauseButton.setOnClickListener {
-            val newPaused = !AnalysisServiceState.isPaused(this)
-            AnalysisServiceState.setPaused(this, newPaused)
+            AnalysisServiceState.setPaused(this, !AnalysisServiceState.isPaused(this))
             populateStatusCard()
             updateFloatingButtonBorderState()
             updateAnalysisCardBorderState()
@@ -930,14 +1324,25 @@ class FloatingAnalyticsService : Service() {
 
     private fun updateFloatingButtonBorderState() {
         val button = floatingButton ?: return
-        val drawable = button.background as? GradientDrawable ?: return
 
         val isActive = AnalysisServiceState.isEnabled(this) && !AnalysisServiceState.isPaused(this)
+        val backgroundRes = if (isActive) {
+            R.drawable.bg_floating_button_active
+        } else {
+            R.drawable.bg_floating_button_inactive
+        }
+
+        button.background = ContextCompat.getDrawable(this, backgroundRes)
+        val drawable = button.background as? GradientDrawable ?: return
         val borderColor = if (isActive) 0xFF4CAF50.toInt() else 0xFFF44336.toInt()
-        val strokeWidthPx = (2 * resources.displayMetrics.density).toInt().coerceAtLeast(1)
+        val fillColor = if (isActive) 0xFF1E1E1E.toInt() else 0xFF2A1A1A.toInt()
+        val strokeWidthPx = (3 * resources.displayMetrics.density).toInt().coerceAtLeast(2)
 
         val mutableDrawable = drawable.mutate() as? GradientDrawable ?: return
+        mutableDrawable.setColor(fillColor)
         mutableDrawable.setStroke(strokeWidthPx, borderColor)
+        button.alpha = if (isActive) 1f else 0.92f
+        button.invalidate()
     }
 
     private fun hideAnalysisCard() {

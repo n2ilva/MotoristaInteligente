@@ -67,7 +67,10 @@ import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.ArrowDropUp
 import androidx.compose.material.icons.filled.MonetizationOn
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material.icons.filled.Speed
@@ -110,6 +113,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -151,13 +155,13 @@ private data class DemandTrendUi(
     val icon: ImageVector
 )
 
-private fun toOffersPerMinute(offersInWindow: Int): Double = offersInWindow / 10.0
+private fun toOffersPerMinute(offersInWindow: Int): Double = offersInWindow / 30.0
 
 private fun resolveDemandTrendUi(offersPerMinute: Double): DemandTrendUi {
     val trendColor = when {
-        offersPerMinute <= 0.0 -> Color(0xFF757575)
-        offersPerMinute > HIGH_DEMAND_THRESHOLD_PER_MINUTE -> Color(0xFFD32F2F)
-        else -> Color(0xFF2E7D32)
+        offersPerMinute > HIGH_DEMAND_THRESHOLD_PER_MINUTE -> Color(0xFF2E7D32)
+        offersPerMinute < HIGH_DEMAND_THRESHOLD_PER_MINUTE -> Color(0xFFD32F2F)
+        else -> Color(0xFF757575)
     }
 
     val trendIcon = when {
@@ -215,6 +219,16 @@ class MainActivity : ComponentActivity() {
 
                 LaunchedEffect(Unit) {
                     while (true) {
+                        val runningNow =
+                            FloatingAnalyticsService.instance != null &&
+                                AnalysisServiceState.isEnabled(this@MainActivity)
+                        if (runningNow != isServiceRunning) {
+                            isServiceRunning = runningNow
+                            if (!runningNow) {
+                                isAnalysisPaused = false
+                            }
+                        }
+
                         val pausedNow = AnalysisServiceState.isPaused(this@MainActivity)
                         if (pausedNow != isAnalysisPaused) {
                             isAnalysisPaused = pausedNow
@@ -700,140 +714,82 @@ fun HomeScreen(
                 modifier = Modifier.padding(20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Toggle switch estilizado
-                val trackColor by animateColorAsState(
+                // Botões de controle lado a lado (energia + pausa/play)
+                val powerTrackColor by animateColorAsState(
                     targetValue = if (isServiceRunning) Color(0xFF4CAF50) else Color(0xFF555555),
-                    animationSpec = tween(300), label = "trackColor"
+                    animationSpec = tween(300), label = "powerTrackColor"
                 )
-                val thumbOffset by animateDpAsState(
-                    targetValue = if (isServiceRunning) 1.dp else 0.dp,
-                    animationSpec = tween(300), label = "thumbOffset"
+                val analysisTrackColor by animateColorAsState(
+                    targetValue = if (!isServiceRunning) Color(0xFF616161)
+                    else if (isAnalysisPaused) Color(0xFF555555)
+                    else Color(0xFF4CAF50),
+                    animationSpec = tween(300), label = "analysisTrackColor"
                 )
 
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(56.dp)
-                        .clip(RoundedCornerShape(28.dp))
-                        .background(trackColor)
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                            enabled = !isStartingService
-                        ) {
-                            if (isServiceRunning) {
-                                isStartingService = false
-                                onStopService()
-                            } else {
-                                isStartingService = true
-                                onStartService()
-                            }
-                        },
-                    contentAlignment = Alignment.Center
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
+                    Box(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                            .weight(1f)
+                            .height(44.dp)
+                            .clip(RoundedCornerShape(22.dp))
+                            .background(powerTrackColor)
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                enabled = !isStartingService
+                            ) {
+                                if (isServiceRunning) {
+                                    isStartingService = false
+                                    onStopService()
+                                } else {
+                                    isStartingService = true
+                                    onStartService()
+                                }
+                            },
+                        contentAlignment = Alignment.Center
                     ) {
                         if (isStartingService && !isServiceRunning) {
-                            Spacer(modifier = Modifier.width(14.dp))
                             androidx.compose.material3.CircularProgressIndicator(
-                                modifier = Modifier.size(22.dp),
-                                strokeWidth = 2.5.dp,
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
                                 color = Color.White
                             )
-                            Spacer(modifier = Modifier.weight(1f))
-                            Text(
-                                text = "Iniciando...",
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White.copy(alpha = 0.95f),
-                                modifier = Modifier.padding(end = 16.dp)
-                            )
-                        } else if (!isServiceRunning) {
-                            // Thumb à esquerda (desativado)
-                            Box(
-                                modifier = Modifier
-                                    .size(44.dp)
-                                    .clip(CircleShape)
-                                    .background(Color.White),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text("○", fontSize = 18.sp, color = Color(0xFF555555))
-                            }
-                            Spacer(modifier = Modifier.weight(1f))
-                            Text(
-                                text = "Desativado",
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White.copy(alpha = 0.9f),
-                                modifier = Modifier.padding(end = 16.dp)
-                            )
                         } else {
-                            // Thumb à direita (ativado)
-                            Spacer(modifier = Modifier.weight(1f))
-                            Text(
-                                text = "Ativado",
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White.copy(alpha = 0.9f),
-                                modifier = Modifier.padding(start = 16.dp)
+                            Icon(
+                                imageVector = Icons.Default.PowerSettingsNew,
+                                contentDescription = "Ligar ou desligar análise",
+                                modifier = Modifier.size(20.dp),
+                                tint = Color.White
                             )
-                            Spacer(modifier = Modifier.weight(1f))
-                            Box(
-                                modifier = Modifier
-                                    .size(44.dp)
-                                    .clip(CircleShape)
-                                    .background(Color.White),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text("●", fontSize = 18.sp, color = Color(0xFF4CAF50))
-                            }
                         }
                     }
-                }
 
-                // Botões de teste (só quando serviço ativo)
-                if (isServiceRunning) {
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    // Status dos serviços
-                    val isAccessibilityActive = RideInfoOcrService.isServiceConnected
-                    val isLocationActive = ContextCompat.checkSelfPermission(
-                        context, Manifest.permission.ACCESS_FINE_LOCATION
-                    ) == PackageManager.PERMISSION_GRANTED
-                    val isOverlayActive = android.provider.Settings.canDrawOverlays(context)
-
-                    Column(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        StatusIndicatorRow("Acessibilidade", isAccessibilityActive)
-                        StatusIndicatorRow("Localização", isLocationActive)
-                        StatusIndicatorRow("Sobreposição de Tela", isOverlayActive)
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    Button(
-                        onClick = onTogglePause,
+                    Box(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .height(46.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isAnalysisPaused) Color(0xFF757575) else Color(0xFF4CAF50)
-                        ),
-                        shape = RoundedCornerShape(12.dp)
+                            .weight(1f)
+                            .height(44.dp)
+                            .clip(RoundedCornerShape(22.dp))
+                            .background(analysisTrackColor)
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                enabled = isServiceRunning
+                            ) {
+                                onTogglePause()
+                            },
+                        contentAlignment = Alignment.Center
                     ) {
-                        Text(
-                            text = if (isAnalysisPaused) "Ativar análise" else "Pausar análise",
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold
+                        Icon(
+                            imageVector = if (isAnalysisPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
+                            contentDescription = if (isAnalysisPaused) "Retomar análise" else "Pausar análise",
+                            modifier = Modifier.size(20.dp),
+                            tint = Color.White.copy(alpha = if (isServiceRunning) 1f else 0.8f)
                         )
                     }
-
                 }
             }
         }
@@ -1153,8 +1109,8 @@ fun WeeklyComparisonScreen() {
 
             WeeklyPlatformCard(
                 title = "Uber",
-                backgroundColor = Color(0xFF0D1B3D).copy(alpha = 0.12f),
-                accentColor = Color(0xFF0D1B3D),
+                backgroundColor = Color(0xFF0D1B3D),
+                accentColor = Color(0xFFFFFFFF),
                 rows = uberRows
             )
 
@@ -1162,8 +1118,8 @@ fun WeeklyComparisonScreen() {
 
             WeeklyPlatformCard(
                 title = "99",
-                backgroundColor = Color(0xFFFFEB3B).copy(alpha = 0.22f),
-                accentColor = Color(0xFFFF6F00),
+                backgroundColor = Color(0xFFFFEB3B),
+                accentColor = Color(0xFF5D4037),
                 rows = ninetyNineRows
             )
         }
@@ -1290,6 +1246,9 @@ private fun WeeklyPlatformCard(
     accentColor: Color,
     rows: List<WeeklyPlatformRow>
 ) {
+    val isDarkBackground = backgroundColor.luminance() < 0.5f
+    val contentColor = if (isDarkBackground) Color.White else Color(0xFF212121)
+
     var compareAKey by remember(rows) { mutableStateOf(rows.lastOrNull()?.dateKey) }
     var compareBKey by remember(rows) {
         mutableStateOf(
@@ -1320,7 +1279,7 @@ private fun WeeklyPlatformCard(
                 Text(
                     text = "Sem dados na semana.",
                     fontSize = 13.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    color = contentColor.copy(alpha = 0.75f)
                 )
             } else {
                 rows.forEachIndexed { index, row ->
@@ -1336,13 +1295,14 @@ private fun WeeklyPlatformCard(
                         Text(
                             text = "${formatDayLabel(row.dayOfWeek)} ${formatDateKeyToBr(row.dateKey)}",
                             fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            color = contentColor
                         )
 
                         Text(
                             text = "${row.offers} ofertas",
                             fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                            color = contentColor.copy(alpha = 0.75f)
                         )
                     }
 
@@ -1367,7 +1327,7 @@ private fun WeeklyPlatformCard(
 
                     if (index < rows.lastIndex) {
                         Spacer(modifier = Modifier.height(8.dp))
-                        HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f))
+                        HorizontalDivider(color = contentColor.copy(alpha = 0.20f))
                         Spacer(modifier = Modifier.height(8.dp))
                     }
                 }
@@ -1377,7 +1337,8 @@ private fun WeeklyPlatformCard(
                     Text(
                         text = "Comparar dias",
                         fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold
+                        fontWeight = FontWeight.SemiBold,
+                        color = contentColor
                     )
                     Spacer(modifier = Modifier.height(8.dp))
 
@@ -1390,6 +1351,7 @@ private fun WeeklyPlatformCard(
                             label = "Dia A",
                             options = rows,
                             selectedKey = compareAKey,
+                            textColor = contentColor,
                             onSelect = { compareAKey = it }
                         )
                         DayPickerDropdown(
@@ -1397,39 +1359,118 @@ private fun WeeklyPlatformCard(
                             label = "Dia B",
                             options = rows,
                             selectedKey = compareBKey,
+                            textColor = contentColor,
                             onSelect = { compareBKey = it }
                         )
                     }
 
                     if (compareA != null && compareB != null) {
-                        val diffOffers = compareA.offers - compareB.offers
-                        val diffAvgPrice = compareA.avgPrice - compareB.avgPrice
-                        val diffAvgPerKm = compareA.avgPricePerKm - compareB.avgPricePerKm
-
                         Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "A (${formatDayLabel(compareA.dayOfWeek)} ${formatDateKeyToBr(compareA.dateKey)}) vs B (${formatDayLabel(compareB.dayOfWeek)} ${formatDateKeyToBr(compareB.dateKey)})",
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                        )
-                        Text(
-                            text = "Ofertas: ${if (diffOffers >= 0) "+" else ""}$diffOffers",
-                            fontSize = 12.sp,
-                            color = if (diffOffers < 0) Color(0xFFF44336) else Color(0xFF2E7D32)
-                        )
-                        Text(
-                            text = "Média: ${if (diffAvgPrice >= 0) "+" else ""}${String.format("R$ %.2f", diffAvgPrice)}",
-                            fontSize = 12.sp,
-                            color = if (diffAvgPrice < 0) Color(0xFFF44336) else Color(0xFF2E7D32)
-                        )
-                        Text(
-                            text = "R$/km: ${if (diffAvgPerKm >= 0) "+" else ""}${String.format("%.2f", diffAvgPerKm)}",
-                            fontSize = 12.sp,
-                            color = if (diffAvgPerKm < 0) Color(0xFFF44336) else Color(0xFF2E7D32)
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            DayMetricsMiniCard(
+                                modifier = Modifier.weight(1f),
+                                label = "Dia A",
+                                row = compareA,
+                                compareWith = compareB
+                            )
+                            DayMetricsMiniCard(
+                                modifier = Modifier.weight(1f),
+                                label = "Dia B",
+                                row = compareB,
+                                compareWith = compareA
+                            )
+                        }
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun DayMetricsMiniCard(
+    modifier: Modifier = Modifier,
+    label: String,
+    row: WeeklyPlatformRow,
+    compareWith: WeeklyPlatformRow
+) {
+    @Composable
+    fun metricWithTrend(title: String, current: Double, other: Double, display: String) {
+        val hasComparison = current > 0.0 && other > 0.0
+        val isHigher = hasComparison && current > other
+        val isLower = hasComparison && current < other
+        val trendSymbol = when {
+            isHigher -> "▲"
+            isLower -> "▼"
+            else -> null
+        }
+        val trendColor = when {
+            isHigher -> Color(0xFF2E7D32)
+            isLower -> Color(0xFFD32F2F)
+            else -> Color.Unspecified
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                text = "$title: $display",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            if (trendSymbol != null) {
+                Text(
+                    text = trendSymbol,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = trendColor,
+                    modifier = Modifier.padding(end = 2.dp)
+                )
+            }
+        }
+    }
+
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.55f)
+        ),
+        shape = RoundedCornerShape(10.dp)
+    ) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            Text(
+                text = "$label · ${formatDayLabel(row.dayOfWeek)} ${formatDateKeyToBr(row.dateKey)}",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            metricWithTrend(
+                title = "Ofertas",
+                current = row.offers.toDouble(),
+                other = compareWith.offers.toDouble(),
+                display = row.offers.toString()
+            )
+            metricWithTrend(
+                title = "Média",
+                current = row.avgPrice,
+                other = compareWith.avgPrice,
+                display = if (row.avgPrice > 0) String.format("R$ %.2f", row.avgPrice) else "—"
+            )
+            metricWithTrend(
+                title = "R$/km",
+                current = row.avgPricePerKm,
+                other = compareWith.avgPricePerKm,
+                display = if (row.avgPricePerKm > 0) String.format("%.2f", row.avgPricePerKm) else "—"
+            )
         }
     }
 }
@@ -1440,6 +1481,7 @@ private fun DayPickerDropdown(
     label: String,
     options: List<WeeklyPlatformRow>,
     selectedKey: String?,
+    textColor: Color = Color.Black,
     onSelect: (String) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -1455,7 +1497,8 @@ private fun DayPickerDropdown(
                     "$label: ${formatDayLabel(selected.dayOfWeek)} ${formatDateKeyToBr(selected.dateKey)}"
                 else
                     "$label: —",
-                fontSize = 12.sp
+                fontSize = 12.sp,
+                color = textColor
             )
         }
 
@@ -1559,20 +1602,12 @@ fun DaySummaryCard(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DemandByRegionScreen(firestoreManager: FirestoreManager?) {
-    var cities by remember { mutableStateOf<List<String>>(emptyList()) }
     var cityDemandMini by remember { mutableStateOf<List<FirestoreManager.CityDemandMini>>(emptyList()) }
     var selectedCity by remember { mutableStateOf<String?>(null) }
     var isLoading by remember { mutableStateOf(true) }
     var expandedCityCard by remember { mutableStateOf<String?>(null) }
     var lastRefreshAt by remember { mutableStateOf(0L) }
-    var nowTick by remember { mutableStateOf(System.currentTimeMillis()) }
-
-    LaunchedEffect(Unit) {
-        while (true) {
-            nowTick = System.currentTimeMillis()
-            delay(1000)
-        }
-    }
+    var isFirebaseReady by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         if (firestoreManager == null) {
@@ -1580,14 +1615,27 @@ fun DemandByRegionScreen(firestoreManager: FirestoreManager?) {
             return@LaunchedEffect
         }
 
-        while (true) {
-            firestoreManager.loadAvailableCitiesWithDrivers { loadedCities ->
-                cities = loadedCities
-                firestoreManager.loadCityDemandMini(loadedCities) { mini ->
-                    cityDemandMini = mini
+        if (firestoreManager.isAuthenticated) {
+            isFirebaseReady = true
+        } else {
+            firestoreManager.signInAnonymously(
+                onSuccess = { isFirebaseReady = true },
+                onError = {
+                    isFirebaseReady = false
                     isLoading = false
-                    lastRefreshAt = System.currentTimeMillis()
                 }
+            )
+        }
+
+        while (!isFirebaseReady) {
+            delay(150)
+        }
+
+        while (true) {
+            firestoreManager.loadCityDemandMini { mini ->
+                cityDemandMini = mini
+                isLoading = false
+                lastRefreshAt = System.currentTimeMillis()
             }
 
             delay(5_000)
@@ -1601,16 +1649,16 @@ fun DemandByRegionScreen(firestoreManager: FirestoreManager?) {
             .verticalScroll(rememberScrollState())
     ) {
         Text(
-            text = "Demanda regional agregada dos últimos 10 minutos (todos os motoristas)",
+            text = "Demanda regional agregada dos últimos 30 minutos (todos os motoristas)",
             fontSize = 14.sp,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
         )
 
         if (lastRefreshAt > 0L) {
-            val elapsedSeconds = ((nowTick - lastRefreshAt) / 1000L).coerceAtLeast(0L)
+            val updatedAtText = android.text.format.DateFormat.format("HH:mm:ss", lastRefreshAt)
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "Atualizado há ${elapsedSeconds}s",
+                text = "Atualizado às $updatedAtText",
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
             )
@@ -1637,7 +1685,7 @@ fun DemandByRegionScreen(firestoreManager: FirestoreManager?) {
             return@Column
         }
 
-        if (cities.isEmpty() && cityDemandMini.isEmpty()) {
+        if (cityDemandMini.isEmpty()) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
@@ -1645,7 +1693,7 @@ fun DemandByRegionScreen(firestoreManager: FirestoreManager?) {
                 )
             ) {
                 Text(
-                    text = "Sem dados de demanda para os últimos 10 minutos.",
+                    text = "Sem dados de demanda para os últimos 30 minutos.",
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                     modifier = Modifier.padding(16.dp),
@@ -1656,18 +1704,30 @@ fun DemandByRegionScreen(firestoreManager: FirestoreManager?) {
         }
 
         val miniByCity = cityDemandMini.associateBy { it.city }
-        val allCities = (cities + cityDemandMini.map { it.city }).distinct()
-        val sortedCities = allCities.sortedWith(
+        val sortedCities = cityDemandMini.map { it.city }.distinct().sortedWith(
             compareByDescending<String> { city -> miniByCity[city]?.offersLast15m ?: 0 }
                 .thenBy { it }
         )
 
+        fun rankColor(index: Int, total: Int): Color {
+            if (total <= 0) return Color(0xFF66BB6A)
+            if (index <= 0) return Color(0xFF2E7D32) // Top 1
+            if (index == 1) return Color(0xFF66BB6A) // Top 2 (verde mais claro)
+
+            val ratio = index.toFloat() / (total - 1).coerceAtLeast(1).toFloat()
+            return when {
+                ratio < 0.60f -> Color(0xFFFF9800) // intermediários
+                else -> Color(0xFFE53935) // piores
+            }
+        }
+
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            sortedCities.forEach { city ->
+            sortedCities.forEachIndexed { cityIndex, city ->
                 val cityMini = miniByCity[city]
                 val offersLast15m = cityMini?.offersLast15m ?: 0
                 val offersPerMinute = toOffersPerMinute(offersLast15m)
                 val cityTrendUi = resolveDemandTrendUi(offersPerMinute)
+                val cityRankColor = rankColor(cityIndex, sortedCities.size)
                 val isExpanded = expandedCityCard == city
 
                 Card(
@@ -1678,7 +1738,7 @@ fun DemandByRegionScreen(firestoreManager: FirestoreManager?) {
                             expandedCityCard = if (isExpanded) null else city
                         },
                     colors = CardDefaults.cardColors(
-                        containerColor = cityTrendUi.color.copy(alpha = 0.10f)
+                        containerColor = cityRankColor.copy(alpha = 0.12f)
                     ),
                     shape = RoundedCornerShape(12.dp),
                     elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
@@ -1703,20 +1763,15 @@ fun DemandByRegionScreen(firestoreManager: FirestoreManager?) {
                             )
                             Column(horizontalAlignment = Alignment.End) {
                                 Text(
-                                    text = String.format(Locale.US, "%.1f/min", offersPerMinute),
+                                    text = "Ofertas: ${cityMini?.offersLast15m ?: 0}",
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = cityTrendUi.color
+                                    color = cityRankColor
                                 )
                                 Text(
                                     text = "U:${cityMini?.offersUberLast15m ?: 0} · 99:${cityMini?.offers99Last15m ?: 0}",
                                     fontSize = 11.sp,
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
-                                )
-                                Text(
-                                    text = "Motoristas: ${cityMini?.activeDriversLast15m ?: 0}",
-                                    fontSize = 10.sp,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.58f)
                                 )
                             }
                             Icon(
@@ -1730,21 +1785,28 @@ fun DemandByRegionScreen(firestoreManager: FirestoreManager?) {
                             Spacer(modifier = Modifier.height(10.dp))
                             if (cityMini?.neighborhoods.isNullOrEmpty()) {
                                 Text(
-                                    text = "Sem bairros com ofertas nos últimos 10 minutos",
+                                    text = "Sem bairros com ofertas nos últimos 30 minutos",
                                     fontSize = 12.sp,
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
                                 )
                             } else {
-                                cityMini?.neighborhoods?.forEach { neighborhoodMini ->
+                                cityMini?.neighborhoods?.forEachIndexed { index, neighborhoodMini ->
                                     val neighborhoodPerMinute = toOffersPerMinute(neighborhoodMini.offersLast15m)
                                     val neighborhoodTrendUi = resolveDemandTrendUi(neighborhoodPerMinute)
+                                    val neighborhoodRankColor = rankColor(index, cityMini.neighborhoods.size)
+                                    val topLabel = when (index) {
+                                        0 -> "TOP 1"
+                                        1 -> "TOP 2"
+                                        2 -> "TOP 3"
+                                        else -> null
+                                    }
 
                                     Card(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .padding(vertical = 3.dp),
                                         colors = CardDefaults.cardColors(
-                                            containerColor = neighborhoodTrendUi.color.copy(alpha = 0.10f)
+                                            containerColor = neighborhoodRankColor.copy(alpha = 0.12f)
                                         ),
                                         shape = RoundedCornerShape(10.dp),
                                         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
@@ -1756,14 +1818,37 @@ fun DemandByRegionScreen(firestoreManager: FirestoreManager?) {
                                             horizontalArrangement = Arrangement.SpaceBetween,
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Text(
-                                                text = neighborhoodMini.neighborhood,
-                                                fontSize = 12.sp,
-                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                                            Row(
                                                 modifier = Modifier.weight(1f),
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                Text(
+                                                    text = neighborhoodMini.neighborhood,
+                                                    fontSize = 12.sp,
+                                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.weight(1f, fill = false)
+                                                )
+                                                if (topLabel != null) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .background(
+                                                                neighborhoodRankColor.copy(alpha = 0.16f),
+                                                                RoundedCornerShape(6.dp)
+                                                            )
+                                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = topLabel,
+                                                            fontSize = 9.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = neighborhoodRankColor
+                                                        )
+                                                    }
+                                                }
+                                            }
                                             Icon(
                                                 imageVector = neighborhoodTrendUi.icon,
                                                 contentDescription = null,
@@ -1772,20 +1857,15 @@ fun DemandByRegionScreen(firestoreManager: FirestoreManager?) {
                                             )
                                             Column(horizontalAlignment = Alignment.End) {
                                                 Text(
-                                                    text = String.format(Locale.US, "%.1f/min", neighborhoodPerMinute),
+                                                    text = "Ofertas: ${neighborhoodMini.offersLast15m}",
                                                     fontSize = 12.sp,
                                                     fontWeight = FontWeight.SemiBold,
-                                                    color = neighborhoodTrendUi.color
+                                                    color = neighborhoodRankColor
                                                 )
                                                 Text(
                                                     text = "U:${neighborhoodMini.offersUberLast15m} · 99:${neighborhoodMini.offers99Last15m}",
                                                     fontSize = 10.sp,
                                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f)
-                                                )
-                                                Text(
-                                                    text = "Motoristas: ${neighborhoodMini.activeDriversLast15m}",
-                                                    fontSize = 9.sp,
-                                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.58f)
                                                 )
                                             }
                                         }
@@ -2920,7 +3000,7 @@ fun DemandMonitorCard(
     ) {
         Column(modifier = Modifier.padding(20.dp)) {
             Text(
-                text = "Monitoramento de Demanda",
+                text = "Histórico do dia",
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold,
                 color = Color(0xFF4CAF50)
@@ -2930,7 +3010,7 @@ fun DemandMonitorCard(
 
             Text(
                   text = if (!isGoogleLoggedIn) "Faça login com Google para visualizar demanda"
-                      else if (hasFirebaseData) "Análise da plataforma (ofertas do dia)"
+                      else if (hasFirebaseData) "Análise da plataforma"
                       else if (firebaseStats.loaded) "Sem ofertas na plataforma hoje"
                       else "Carregando dados da base...",
                 fontSize = 12.sp,
@@ -2963,27 +3043,7 @@ fun DemandMonitorCard(
             // ========== DADOS DO FIREBASE (histórico do dia) ==========
             if (hasFirebaseData) {
                 Text(
-                    text = "Histórico do dia",
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color(0xFF1E88E5)
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Totais
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly
-                ) {
-                    DemandStatColumn("Total", "${firebaseStats.totalOffersToday}", "ofertas hoje")
-                    DemandStatColumn("Última 1h", "${firebaseStats.offersLast1h}", "ofertas")
-                    DemandStatColumn("Últimas 3h", "${firebaseStats.offersLast3h}", "ofertas")
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Text(
-                    text = "POR PLATAFORMA",
+                    text = "Por plataforma",
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
@@ -3014,6 +3074,23 @@ fun DemandMonitorCard(
                                 color = Color.White.copy(alpha = 0.8f),
                                 letterSpacing = 1.sp
                             )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "↑ ${if (firebaseStats.maxOfferPriceUber > 0) String.format("R$ %.2f", firebaseStats.maxOfferPriceUber) else "—"}",
+                                    fontSize = 10.sp,
+                                    color = Color(0xFF81C784)
+                                )
+                                Text(
+                                    text = "↓ ${if (firebaseStats.minOfferPriceUber > 0) String.format("R$ %.2f", firebaseStats.minOfferPriceUber) else "—"}",
+                                    fontSize = 10.sp,
+                                    color = Color(0xFFEF9A9A)
+                                )
+                            }
                             Spacer(modifier = Modifier.height(6.dp))
                             Text(
                                 text = "${firebaseStats.offersUber} ofertas",
@@ -3055,6 +3132,23 @@ fun DemandMonitorCard(
                                 color = Color(0xFF212121),
                                 letterSpacing = 1.sp
                             )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "↑ ${if (firebaseStats.maxOfferPrice99 > 0) String.format("R$ %.2f", firebaseStats.maxOfferPrice99) else "—"}",
+                                    fontSize = 10.sp,
+                                    color = Color(0xFF2E7D32)
+                                )
+                                Text(
+                                    text = "↓ ${if (firebaseStats.minOfferPrice99 > 0) String.format("R$ %.2f", firebaseStats.minOfferPrice99) else "—"}",
+                                    fontSize = 10.sp,
+                                    color = Color(0xFFC62828)
+                                )
+                            }
                             Spacer(modifier = Modifier.height(6.dp))
                             Text(
                                 text = "${firebaseStats.offers99} ofertas",
@@ -3079,52 +3173,25 @@ fun DemandMonitorCard(
                     }
                 }
 
-                // Melhor e pior R$/km do dia
-                if (firebaseStats.bestPricePerKm > 0) {
-                    Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(8.dp))
 
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(
-                                Color(0xFF424242).copy(alpha = 0.2f),
-                                RoundedCornerShape(8.dp)
-                            )
-                            .padding(12.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column {
-                                Text(
-                                    text = "Melhor R$/km",
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                                )
-                                Text(
-                                    text = String.format("R$ %.2f", firebaseStats.bestPricePerKm),
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF4CAF50)
-                                )
-                            }
-                            Column(horizontalAlignment = Alignment.End) {
-                                Text(
-                                    text = "Pior R$/km",
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                                )
-                                Text(
-                                    text = String.format("R$ %.2f", firebaseStats.worstPricePerKm),
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFFF44336)
-                                )
-                            }
-                        }
-                    }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Ofertas hoje: ${firebaseStats.totalOffersToday}",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White
+                    )
+                    Text(
+                        text = "Última 1h: ${firebaseStats.offersLast1h}",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White
+                    )
                 }
             }
 

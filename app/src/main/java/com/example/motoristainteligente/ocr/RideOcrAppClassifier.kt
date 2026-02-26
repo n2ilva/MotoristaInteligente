@@ -2,6 +2,10 @@ package com.example.motoristainteligente
 
 object RideOcrAppClassifier {
 
+    private fun matchesAllowedPackage(packageName: String, allowedPackages: Set<String>): Boolean {
+        return packageName in allowedPackages || allowedPackages.any { packageName.startsWith("$it.") }
+    }
+
     private val UBER_CARD_MARKERS = listOf(
         Regex("""\buberx\b""", RegexOption.IGNORE_CASE),
         Regex("""\buber\s*comfort\b""", RegexOption.IGNORE_CASE),
@@ -32,15 +36,7 @@ object RideOcrAppClassifier {
         allMonitored: Set<String>
     ): Boolean {
         if (packageName == ownPackage || packageName.startsWith("$ownPackage.")) return false
-        if (packageName in allMonitored) return true
-        if (allMonitored.any { packageName.startsWith(it) }) return true
-
-        val lower = packageName.lowercase()
-        val looksLikeUber = lower.contains("uber")
-        val looksLikeNineNine = lower.contains("99") || lower.contains("ninenine")
-        val looksLikeDriverApp = lower.contains("driver") || lower.contains("taxi") || lower.contains("motorista")
-
-        return (looksLikeUber || looksLikeNineNine) && looksLikeDriverApp
+        return matchesAllowedPackage(packageName, allMonitored)
     }
 
     fun detectAppSource(
@@ -48,16 +44,10 @@ object RideOcrAppClassifier {
         uberPackages: Set<String>,
         ninetyNinePackages: Set<String>
     ): AppSource {
-        val lower = packageName.lowercase()
-
-        if (packageName in uberPackages || uberPackages.any { packageName.startsWith(it) } || lower.contains("uber")) {
+        if (matchesAllowedPackage(packageName, uberPackages)) {
             return AppSource.UBER
         }
-        if (packageName in ninetyNinePackages ||
-            ninetyNinePackages.any { packageName.startsWith(it) } ||
-            lower.contains("99") ||
-            lower.contains("ninenine")
-        ) {
+        if (matchesAllowedPackage(packageName, ninetyNinePackages)) {
             return AppSource.NINETY_NINE
         }
         return AppSource.UNKNOWN

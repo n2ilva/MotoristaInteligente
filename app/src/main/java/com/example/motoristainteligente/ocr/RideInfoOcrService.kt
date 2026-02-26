@@ -405,9 +405,7 @@ class RideInfoOcrService : AccessibilityService() {
     )
     // 99: clique no card de informações da corrida (textos que aparecem no card clicável)
     private val NINETY_NINE_CARD_CLICK_PATTERNS = listOf(
-        "aceitar", "accept",
-        // O card da 99 mostra preço — se clicou num elemento com R$ durante oferta, é aceite
-        "r\\$", "reais"
+        "aceitar", "accept", "aceitar por", "confirmar"
     )
 
     private fun String.isOwnPackageName(): Boolean {
@@ -510,25 +508,21 @@ class RideInfoOcrService : AccessibilityService() {
     }
 
     /**
-     * Detecta se o app usa renderização customizada que resulta em árvore de acessibilidade VAZIA.
-     * App 99 (com.app99.driver) usa Compose/Canvas sem labels → nenhum texto nos nós.
-     * App Uber (com.ubercab.driver) pode usar React Native que também resulta em árvore vazia.
-     * Para esses apps, OCR é a ÚNICA via funcional de extração.
+     * NÃO inicia o serviço automaticamente.
+     * A análise deve ser ativada apenas por ação manual do usuário na UI.
      */
     private fun ensureFloatingServiceRunning() {
         if (!AnalysisServiceState.isEnabled(this)) {
             return
         }
 
-        try {
-            val intent = Intent(this, FloatingAnalyticsService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(intent)
-            } else {
-                startService(intent)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Falha ao iniciar FloatingAnalyticsService automaticamente", e)
+        if (FloatingAnalyticsService.instance == null &&
+            shouldLogDiagnostic("manual-activation-required")
+        ) {
+            Log.w(
+                TAG,
+                "FloatingAnalyticsService inativo. Ativação automática bloqueada; usuário deve iniciar manualmente."
+            )
         }
     }
 
@@ -546,7 +540,10 @@ class RideInfoOcrService : AccessibilityService() {
             return
         }
 
-        // Não filtrar por pacote — ler a tela inteira e detectar Uber/99 pelo conteúdo
+        // Processar somente Uber/99 para evitar leitura de janelas de outros apps
+        if (!isMonitoredPackage(packageName)) {
+            return
+        }
 
         val eventTypeName = AccessibilityEvent.eventTypeToString(event.eventType)
         val eventLogKey = "$packageName|$eventTypeName"
@@ -659,9 +656,8 @@ class RideInfoOcrService : AccessibilityService() {
                 }
 
                 val instance = FloatingAnalyticsService.instance
-                if (instance == null) {
-                    Log.w(TAG, "HEALTHCHECK: FloatingAnalyticsService morto — reiniciando")
-                    ensureFloatingServiceRunning()
+                if (instance == null && shouldLogDiagnostic("healthcheck-manual-only")) {
+                    Log.w(TAG, "HEALTHCHECK: FloatingAnalyticsService inativo (sem auto-restart, modo manual)")
                 }
                 debounceHandler.postDelayed(this, HEALTH_CHECK_INTERVAL_MS)
             }
@@ -803,6 +799,14 @@ class RideInfoOcrService : AccessibilityService() {
     private fun shouldSuppressBecauseTripInProgress(text: String): Boolean {
         if (!tripInProgress) return false
 
+        // Se uma nova oferta forte apareceu, sair do modo de supressão imediatamente.
+        // Evita ficar "travado" em tripInProgress por falso positivo de aceitação.
+        if (hasStrongRideSignal(text)) {
+            tripInProgress = false
+            tripInProgressStartedAt = 0L
+            return false
+        }
+
         val now = System.currentTimeMillis()
         if (tripInProgressStartedAt > 0L && now - tripInProgressStartedAt > TRIP_MODE_MAX_DURATION_MS) {
             tripInProgress = false
@@ -844,6 +848,11 @@ class RideInfoOcrService : AccessibilityService() {
      * Registra que uma nova oferta foi mostrada, iniciando a janela de detecção de aceitação.
      */
     private fun registerOfferForAcceptanceTracking(appSource: AppSource) {
+        // Nova oferta na tela significa que não estamos mais em corrida ativa anterior.
+        // Isso evita manter supressão indevida entre ofertas consecutivas.
+        tripInProgress = false
+        tripInProgressStartedAt = 0L
+
         lastOfferAppSource = appSource
         lastOfferTimestamp = System.currentTimeMillis()
         lastOfferAlreadyAccepted = false
@@ -1795,34 +1804,11 @@ class RideInfoOcrService : AccessibilityService() {
                 service.onRideDetected(data)
                 Log.i(TAG, ">>> $successMessage (após debounce)")
             } else {
-                Log.w(TAG, "FloatingAnalyticsService morto — reiniciando automaticamente")
-                ensureFloatingServiceRunning()
-                // Reenfileirar para tentar após o serviço subir (2s de espera)
-                debounceHandler.postDelayed({
-                    val svc = FloatingAnalyticsService.instance
-                    val d = pendingRideData ?: return@postDelayed
-                    if (svc != null) {
-                        pendingRideData = null
-                        svc.onRideDetected(d)
-                        Log.i(TAG, ">>> $successMessage (após restart do serviço)")
-                    } else {
-                        Log.e(TAG, "FloatingAnalyticsService não reiniciou a tempo — tentando novamente")
-                        ensureFloatingServiceRunning()
-                        // Terceira tentativa após mais 3s
-                        debounceHandler.postDelayed({
-                            val svc2 = FloatingAnalyticsService.instance
-                            val d2 = pendingRideData ?: return@postDelayed
-                            if (svc2 != null) {
-                                pendingRideData = null
-                                svc2.onRideDetected(d2)
-                                Log.i(TAG, ">>> $successMessage (terceira tentativa)")
-                            } else {
-                                pendingRideData = null
-                                Log.e(TAG, "FloatingAnalyticsService não disponível após 3 tentativas — corrida perdida: R$ ${d2.ridePrice}")
-                            }
-                        }, 3000L)
-                    }
-                }, 2000L)
+                pendingRideData = null
+                Log.w(
+                    TAG,
+                    "FloatingAnalyticsService inativo. Corrida não enviada; ativação manual é obrigatória."
+                )
             }
         }
         pendingRunnable = runnable

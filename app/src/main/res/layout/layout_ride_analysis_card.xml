@@ -7,41 +7,41 @@
     android:orientation="vertical"
     android:background="@drawable/bg_card_analysis_bottom"
     android:elevation="16dp"
-    android:paddingStart="4dp"
-    android:paddingEnd="4dp">
+    android:paddingStart="2dp"
+    android:paddingEnd="2dp">
 
     <!-- Header: Logo App + Recomendação + Score + Fechar -->
     <RelativeLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:paddingStart="14dp"
-        android:paddingEnd="10dp"
-        android:paddingTop="8dp"
-        android:paddingBottom="4dp">
+        android:paddingStart="10dp"
+        android:paddingEnd="8dp"
+        android:paddingTop="6dp"
+        android:paddingBottom="2dp">
 
         <!-- Ícone do app -->
         <FrameLayout
             android:id="@+id/appIconContainer"
-            android:layout_width="26dp"
-            android:layout_height="26dp"
+            android:layout_width="22dp"
+            android:layout_height="22dp"
             android:layout_alignParentStart="true"
             android:layout_centerVertical="true">
 
             <ImageView
                 android:id="@+id/ivAppIcon"
-                android:layout_width="26dp"
-                android:layout_height="26dp"
+                android:layout_width="22dp"
+                android:layout_height="22dp"
                 android:src="@drawable/logo"
                 android:contentDescription="App logo" />
 
             <TextView
                 android:id="@+id/tvAppIconLabel"
-                android:layout_width="26dp"
-                android:layout_height="26dp"
+                android:layout_width="22dp"
+                android:layout_height="22dp"
                 android:gravity="center"
                 android:text="U"
                 android:textColor="#FFFFFF"
-                android:textSize="12sp"
+                android:textSize="10sp"
                 android:textStyle="bold" />
         </FrameLayout>
 
@@ -51,10 +51,10 @@
             android:layout_height="wrap_content"
             android:layout_toEndOf="@+id/appIconContainer"
             android:layout_centerVertical="true"
-            android:layout_marginStart="6dp"
+            android:layout_marginStart="4dp"
             android:text="UBER"
             android:textColor="#AAAAAA"
-            android:textSize="12sp"
+            android:textSize="10sp"
             android:textStyle="bold" />
 
         <!-- Recomendação central -->
@@ -65,20 +65,20 @@
             android:layout_centerInParent="true"
             android:text="COMPENSA"
             android:textColor="#4CAF50"
-            android:textSize="15sp"
+            android:textSize="14sp"
             android:textStyle="bold" />
 
         <ImageView
             android:id="@+id/btnClose"
-            android:layout_width="22dp"
-            android:layout_height="22dp"
+            android:layout_width="20dp"
+            android:layout_height="20dp"
             android:layout_alignParentEnd="true"
             android:layout_centerVertical="true"
             android:src="@drawable/ic_close"
             android:contentDescription="Fechar"
             android:clickable="true"
             android:focusable="true"
-            android:padding="2dp" />
+            android:padding="1dp" />
     </RelativeLayout>
 
     <!-- Métricas da corrida -->
@@ -86,9 +86,9 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:paddingStart="10dp"
-        android:paddingEnd="10dp"
-        android:paddingBottom="4dp">
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp"
+        android:paddingBottom="2dp">
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -107,7 +107,7 @@
                     android:layout_height="wrap_content"
                     android:text="Valor da Corrida"
                     android:textColor="#888888"
-                    android:textSize="9sp" />
+                    android:textSize="8sp" />
 
                 <TextView
                     android:id="@+id/tvRideValue"
@@ -115,76 +115,15 @@
                     android:layout_height="wrap_content"
                     android:text="R$ 0,00"
                     android:textColor="#FFFFFF"
-                    android:textSize="14sp"
+                    android:textSize="13sp"
                     android:textStyle="bold" />
             </LinearLayout>
 
             <View
                 android:layout_width="1dp"
-                android:layout_height="30dp"
+                android:layout_height="24dp"
                 android:layout_gravity="center_vertical"
                 android:background="#22FFFFFF" />
-
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="vertical"
-                android:gravity="center">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Km passageiro"
-                    android:textColor="#888888"
-                    android:textSize="9sp" />
-
-                <TextView
-                    android:id="@+id/tvPickupKm"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="0,0 km"
-                    android:textColor="#FFFFFF"
-                    android:textSize="14sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
-
-            <View
-                android:layout_width="1dp"
-                android:layout_height="30dp"
-                android:layout_gravity="center_vertical"
-                android:background="#22FFFFFF" />
-
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="vertical"
-                android:gravity="center">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Km destino"
-                    android:textColor="#888888"
-                    android:textSize="9sp" />
-
-                <TextView
-                    android:id="@+id/tvDestinationKm"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="0,0 km"
-                    android:textColor="#FFFFFF"
-                    android:textSize="14sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
-        </LinearLayout>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="4dp">
 
             <LinearLayout
                 android:layout_width="0dp"
@@ -198,7 +137,7 @@
                     android:layout_height="wrap_content"
                     android:text="Média valor/Km"
                     android:textColor="#888888"
-                    android:textSize="9sp" />
+                    android:textSize="8sp" />
 
                 <TextView
                     android:id="@+id/tvAvgPerKm"
@@ -206,13 +145,13 @@
                     android:layout_height="wrap_content"
                     android:text="R$ 0,00"
                     android:textColor="#FFFFFF"
-                    android:textSize="14sp"
+                    android:textSize="13sp"
                     android:textStyle="bold" />
             </LinearLayout>
 
             <View
                 android:layout_width="1dp"
-                android:layout_height="30dp"
+                android:layout_height="24dp"
                 android:layout_gravity="center_vertical"
                 android:background="#22FFFFFF" />
 
@@ -228,7 +167,7 @@
                     android:layout_height="wrap_content"
                     android:text="Média valor/Hora"
                     android:textColor="#888888"
-                    android:textSize="9sp" />
+                    android:textSize="8sp" />
 
                 <TextView
                     android:id="@+id/tvAvgPerHour"
@@ -236,7 +175,7 @@
                     android:layout_height="wrap_content"
                     android:text="R$ 0,00"
                     android:textColor="#FFFFFF"
-                    android:textSize="14sp"
+                    android:textSize="13sp"
                     android:textStyle="bold" />
             </LinearLayout>
         </LinearLayout>
@@ -246,13 +185,13 @@
         android:id="@+id/tvQuickInsights"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginStart="10dp"
-        android:layout_marginEnd="10dp"
-        android:layout_marginTop="2dp"
-        android:layout_marginBottom="4dp"
+        android:layout_marginStart="8dp"
+        android:layout_marginEnd="8dp"
+        android:layout_marginTop="1dp"
+        android:layout_marginBottom="2dp"
         android:text="Dentro dos seus parâmetros"
         android:textColor="#FFD54F"
-        android:textSize="10sp"
+        android:textSize="9sp"
         android:gravity="center"
         android:textAlignment="center"
         android:maxLines="2"
@@ -262,8 +201,8 @@
     <View
         android:layout_width="match_parent"
         android:layout_height="1dp"
-        android:layout_marginStart="10dp"
-        android:layout_marginEnd="10dp"
+        android:layout_marginStart="8dp"
+        android:layout_marginEnd="8dp"
         android:background="#15FFFFFF" />
 
     <!-- Rodapé: Endereços de embarque e destino -->
@@ -271,10 +210,10 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:paddingStart="12dp"
-        android:paddingEnd="12dp"
-        android:paddingTop="4dp"
-        android:paddingBottom="4dp">
+        android:paddingStart="10dp"
+        android:paddingEnd="10dp"
+        android:paddingTop="3dp"
+        android:paddingBottom="3dp">
 
         <!-- Endereço do passageiro (embarque) -->
         <LinearLayout
@@ -298,7 +237,7 @@
                 android:layout_weight="1"
                 android:text="Endereço do passageiro"
                 android:textColor="#AAAAAA"
-                android:textSize="10sp"
+                android:textSize="9sp"
                 android:maxLines="1"
                 android:ellipsize="end" />
         </LinearLayout>
@@ -309,7 +248,7 @@
             android:layout_height="wrap_content"
             android:orientation="horizontal"
             android:gravity="center_vertical"
-            android:layout_marginTop="1dp">
+            android:layout_marginTop="0dp">
 
             <TextView
                 android:layout_width="wrap_content"
@@ -326,7 +265,7 @@
                 android:layout_weight="1"
                 android:text="Endereço de destino"
                 android:textColor="#AAAAAA"
-                android:textSize="10sp"
+                android:textSize="9sp"
                 android:maxLines="1"
                 android:ellipsize="end" />
         </LinearLayout>
@@ -335,9 +274,9 @@
     <!-- Barra indicadora (embaixo do card) -->
     <View
         android:layout_width="40dp"
-        android:layout_height="4dp"
+        android:layout_height="3dp"
         android:layout_gravity="center_horizontal"
-        android:layout_marginBottom="6dp"
+        android:layout_marginBottom="4dp"
         android:background="@drawable/bg_drag_indicator" />
 
 </LinearLayout>

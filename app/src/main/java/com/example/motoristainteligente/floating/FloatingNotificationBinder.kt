@@ -25,9 +25,11 @@ fun createPeakAlertsNotificationChannel(service: Service, channelId: String) {
     val channel = NotificationChannel(
         channelId,
         "Alertas de Pico",
-        NotificationManager.IMPORTANCE_DEFAULT
+        NotificationManager.IMPORTANCE_HIGH
     ).apply {
         description = "Alertas de pico chegando e pico diminuindo"
+        enableVibration(true)
+        vibrationPattern = longArrayOf(0, 220, 140, 220)
     }
 
     val manager = service.getSystemService(NotificationManager::class.java)
@@ -91,7 +93,11 @@ fun sendPeakAlertNotification(service: Service, channelId: String, id: Int, titl
         .setContentTitle(title)
         .setContentText(message)
         .setStyle(NotificationCompat.BigTextStyle().bigText(message))
-        .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+        .setPriority(NotificationCompat.PRIORITY_HIGH)
+        .setCategory(NotificationCompat.CATEGORY_ALARM)
+        .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+        .setDefaults(NotificationCompat.DEFAULT_ALL)
+        .setVibrate(longArrayOf(0, 220, 140, 220))
         .setAutoCancel(true)
         .setContentIntent(openPendingIntent)
         .build()
@@ -115,6 +121,9 @@ fun sendHighPriorityAlertNotification(service: Service, channelId: String, id: I
         .setContentText(message)
         .setStyle(NotificationCompat.BigTextStyle().bigText(message))
         .setPriority(NotificationCompat.PRIORITY_HIGH)
+        .setCategory(NotificationCompat.CATEGORY_ALARM)
+        .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+        .setDefaults(NotificationCompat.DEFAULT_ALL)
         .setAutoCancel(true)
         .setContentIntent(openPendingIntent)
         .setVibrate(longArrayOf(0, 300, 180, 300))

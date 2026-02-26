@@ -10,7 +10,6 @@ fun bindRideAnalysisCard(
     onClose: () -> Unit
 ) {
     val pickupDistance = analysis.pickupDistanceKm
-    val destinationDistance = analysis.rideData.distanceKm
     val totalDistanceKm = (analysis.rideData.distanceKm + pickupDistance).coerceAtLeast(0.1)
     val valuePerKm = analysis.rideData.ridePrice / totalDistanceKm
     val valuePerHour = analysis.estimatedEarningsPerHour
@@ -25,9 +24,6 @@ fun bindRideAnalysisCard(
     // Referências das configurações do motorista
     val minPricePerKm = analysis.referencePricePerKm
     val minEarningsPerHour = RideAnalyzer.getCurrentReferences()["minEarningsPerHour"] ?: 20.0
-    val prefs = DriverPreferences(card.context)
-    val maxPickupDistance = prefs.maxPickupDistance
-    val maxRideDistance = prefs.maxRideDistance
 
     // Cor verde se atingiu o mínimo, vermelho se ficou abaixo
     val colorGreen = 0xFF4CAF50.toInt()
@@ -41,16 +37,6 @@ fun bindRideAnalysisCard(
     card.findViewById<TextView>(R.id.tvRideValue).apply {
         text = String.format("R$ %.2f", analysis.rideData.ridePrice)
         setTextColor(recColor)
-    }
-
-    card.findViewById<TextView>(R.id.tvPickupKm).apply {
-        text = String.format("%.1f km", pickupDistance)
-        setTextColor(if (pickupDistance >= maxPickupDistance) colorGreen else colorRed)
-    }
-
-    card.findViewById<TextView>(R.id.tvDestinationKm).apply {
-        text = String.format("%.1f km", destinationDistance)
-        setTextColor(if (destinationDistance >= maxRideDistance) colorGreen else colorRed)
     }
 
     card.findViewById<TextView>(R.id.tvAvgPerKm).apply {
