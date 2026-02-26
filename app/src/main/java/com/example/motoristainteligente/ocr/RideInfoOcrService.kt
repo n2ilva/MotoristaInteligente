@@ -97,8 +97,8 @@ class RideInfoOcrService : AccessibilityService() {
         private const val OWN_PACKAGE = "com.example.motoristainteligente"
 
         // Padrões de extração de dados
-        // Aceita: R$ 15,50 / R$15.50 / R$ 8,00 / R$ 125,90 / R$7.5 / R$ 15
-        private val PRICE_PATTERN = Regex("""R\$\s*(\d{1,4}(?:[,\.]\d{1,2})?)""")
+        // Aceita: R$ 15,50 / R$15.50 / $ 15,50 / $15.50 / R$ 8,00 / R$ 125,90 / R$7.5 / R$ 15
+        private val PRICE_PATTERN = Regex("""(?:R?\$)\s*(\d{1,4}(?:[,\.]\d{1,2})?)""")
         private val KM_IN_PAREN_PATTERN = Regex("""\(\s*(\d{1,3}(?:[,\.]\d+)?)\s*km\s*\)""", RegexOption.IGNORE_CASE)
         // Fallback sem R$: 15,50 / 125.90 (2 casas para evitar conflito com km/min)
         private val FALLBACK_PRICE_PATTERN = Regex("""\b(\d{1,4}[,\.]\d{2})\b""")
@@ -109,7 +109,12 @@ class RideInfoOcrService : AccessibilityService() {
         // Aceita: 8.2 km / 8,2km / 12.5 Km / 3km
         private val DISTANCE_PATTERN = Regex("""(\d{1,3}[,\.]?\d*)\s*km""", RegexOption.IGNORE_CASE)
         // Aceita: 15 min / 8min / 20 minutos / 1-3 nmin (OCR)
-        private val TIME_PATTERN = Regex("""(\d{1,3})\s*(?:n?\s*min(?:utos?)?)""", RegexOption.IGNORE_CASE)
+        private val TIME_PATTERN = Regex("""(\d{1,3})\s*(?:n?\s*min(?:utos?)?)\b""", RegexOption.IGNORE_CASE)
+        // Aceita: 1 h e 43 min / 2h 05 min / 43 min
+        private val DURATION_PATTERN = Regex(
+            """(?:(\d{1,2})\s*h(?:oras?)?\s*(?:e\s*)?)?(\d{1,3})\s*min(?:utos?)?\b""",
+            RegexOption.IGNORE_CASE
+        )
         // Nota/rating do usuário (quando exposta na oferta)
         private val USER_RATING_PATTERN = Regex(
             """(?:nota|avalia(?:ç|c)ão|rating|estrelas?)\s*[:]?\s*(\d(?:[\.,]\d{1,2})?)|\b(\d(?:[\.,]\d{1,2}))\s*[★⭐]|[★⭐]\s*(\d(?:[\.,]\d{1,2})?)""",
@@ -123,20 +128,20 @@ class RideInfoOcrService : AccessibilityService() {
             RegexOption.IGNORE_CASE
         )
         private val PICKUP_TIME_PATTERN = Regex(
-            """(?:buscar|embarque|pickup|retirada|chegar|chegada|até\s+(?:o\s+)?passageiro|ir\s+até)[^\d]{0,20}(\d{1,3})\s*min(?:utos?)?""",
+            """(?:buscar|embarque|pickup|retirada|chegar|chegada|até\s+(?:o\s+)?passageiro|ir\s+até)[^\d]{0,20}(\d{1,3})\s*min(?:utos?)?\b""",
             RegexOption.IGNORE_CASE
         )
         // Padrão inline: "X min (Y km)" / "X minuto (Y km)" / "X minutos (Y km)" — Uber e 99
         private val PICKUP_INLINE_PATTERN = Regex(
-            """(\d{1,2})\s*min(?:utos?)?\s*\(?\s*(\d{1,3}(?:[,\.]\d+)?)\s*km\s*\)?""",
+            """(\d{1,2})\s*min(?:utos?)?\s*(?:de\s*dist[aâ]ncia)?\s*\(?\s*(\d{1,3}(?:[,\.]\d+)?)\s*km\s*\)?""",
             RegexOption.IGNORE_CASE
         )
 
         // Padrão universal OCR: "Xmin (Y,Zkm)" ou "X minutos (Y.Z km)"
         // 99:   "3min (1,1km)"  / "8min (4,4km)"
-        // Uber: "7 minutos (3.0 km) de distância" / "Viagem de 10 minutos (5.6 km)"
+        // Uber: "7 minutos (3.0 km) de distância" / "Viagem de 1 h e 43 min (93.7 km)"
         private val ROUTE_PAIR_PATTERN = Regex(
-            """(\d{1,3})\s*min(?:utos?)?\s*\(\s*(\d{1,3}(?:[,\.]\d+)?)\s*km\s*\)""",
+            """(?:(\d{1,2})\s*h(?:oras?)?\s*(?:e\s*)?)?(\d{1,3})\s*min(?:utos?)?(?:\s*de\s*dist[aâ]ncia)?\s*(?:\(\s*)?(\d{1,3}(?:[,\.]\d+)?)\s*km(?:\s*\))?""",
             RegexOption.IGNORE_CASE
         )
         // 99: pickup expresso em metros: "3min (843m)" — passageiro muito próximo
@@ -285,12 +290,13 @@ class RideInfoOcrService : AccessibilityService() {
         private const val EVENT_LOG_THROTTLE_MS = 1200L
         private const val DIAGNOSTIC_LOG_THROTTLE_MS = 10000L
         private const val LIMITED_DATA_ALERT_COOLDOWN_MS = 20000L
-        private const val AUTO_DEBUG_DUMP_ENABLED = true
+        private const val AUTO_DEBUG_DUMP_ENABLED = false
         private const val AUTO_DEBUG_DUMP_INTERVAL_MS = 3000L
         private const val AUTO_DEBUG_MAX_CHARS = 5000
         private const val OCR_FALLBACK_ENABLED = true
         private const val OCR_FALLBACK_MIN_INTERVAL_MS = 1200L  // 1.2s entre tentativas OCR
         private const val OCR_BOTTOM_HALF_START_FRACTION = 0.3
+        private const val OCR_BOTTOM_HALF_START_FRACTION_99 = 0.12
 
         // Filtro: ignorar nós de acessibilidade no topo da tela (earnings card Uber)
         private const val TOP_SCREEN_FILTER_FRACTION = 0.15  // 15% superior da tela
@@ -587,11 +593,24 @@ class RideInfoOcrService : AccessibilityService() {
         }
 
         if (now - lastDetectedTime < cooldown) {
-            if (now - lastCooldownDebugAt > DEBUG_COOLDOWN_LOG_INTERVAL) {
-                lastCooldownDebugAt = now
-                Log.d(TAG, "Ignorado por cooldown: tipo=${AccessibilityEvent.eventTypeToString(eventType)}, delta=${now - lastDetectedTime}ms, cooldown=${cooldown}ms")
+            val appSource = detectAppSource(packageName)
+            val bypassCooldown =
+                eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+                    hasStrongRideSignal(
+                        event.text?.joinToString(" ")?.trim().orEmpty(),
+                        appSource
+                    )
+
+            if (bypassCooldown) {
+                Log.d(TAG, "Cooldown ignorado: nova corrida detectada via WINDOW_STATE_CHANGED com sinal forte")
+                lastDetectedHash = ""
+            } else {
+                if (now - lastCooldownDebugAt > DEBUG_COOLDOWN_LOG_INTERVAL) {
+                    lastCooldownDebugAt = now
+                    Log.d(TAG, "Ignorado por cooldown: tipo=${AccessibilityEvent.eventTypeToString(eventType)}, delta=${now - lastDetectedTime}ms, cooldown=${cooldown}ms")
+                }
+                return
             }
-            return
         }
 
         when (eventType) {
@@ -674,7 +693,7 @@ class RideInfoOcrService : AccessibilityService() {
         // Verificar sinais de REJEIÇÃO primeiro (expirou, perdida, etc.)
         val rejectionMatch = REJECTION_SIGNALS.any { lower.contains(it) }
         if (rejectionMatch) {
-            Log.d(TAG, "✗ Sinal de REJEIÇÃO detectado: '$text' → oferta descartada")
+            Log.d(TAG, "✗ Sinal de REJEIÇÃO detectado: '$text' → oferta descartada, resetando cooldowns")
             tripInProgress = false
             tripInProgressStartedAt = 0L
             clearOfferState()
@@ -834,6 +853,8 @@ class RideInfoOcrService : AccessibilityService() {
         lastOfferAppSource = null
         lastOfferTimestamp = 0L
         lastOfferAlreadyAccepted = false
+        lastDetectedTime = 0L
+        lastDetectedHash = ""
     }
 
     /**
@@ -856,10 +877,31 @@ class RideInfoOcrService : AccessibilityService() {
     // ========================
 
     private fun handleNotification(event: AccessibilityEvent, packageName: String) {
+        val eventText = event.text?.joinToString(" ")?.trim().orEmpty()
+        if (eventText.isNotBlank()) {
+            processCandidateText(
+                finalText = eventText,
+                packageName = packageName,
+                isStateChange = true,
+                rootPackage = "notification",
+                allowOcrFallback = true
+            )
+        }
         requestOcrFallbackForOffer(packageName, "notification-ocr-only")
     }
 
     private fun handleWindowChange(event: AccessibilityEvent, packageName: String, isStateChange: Boolean) {
+        val eventText = event.text?.joinToString(" ")?.trim().orEmpty()
+        if (eventText.isNotBlank()) {
+            processCandidateText(
+                finalText = eventText,
+                packageName = packageName,
+                isStateChange = isStateChange,
+                rootPackage = "event-text",
+                allowOcrFallback = true
+            )
+        }
+
         if (isStateChange) {
             // Aguardar a animação de entrada do card completar (ex.: Uber desliza card de baixo)
             // antes de disparar o OCR, para evitar capturar dados parcialmente renderizados
@@ -918,6 +960,12 @@ class RideInfoOcrService : AccessibilityService() {
         // Muitos eventos de Uber/99 trazem apenas IDs de layout (sem conteúdo útil de corrida).
         // Ex.: com.ubercab.driver:id/rootView ...
         if (looksLikeStructuralIdOnlyText(sanitizedText)) {
+            if (allowOcrFallback && rootPackage != "ocr-fallback") {
+                val requested = requestOcrFallbackForOffer(packageName, "structural-id-only")
+                if (requested) {
+                    Log.d(TAG, "Texto estrutural (IDs) detectado em $packageName → OCR disparado")
+                }
+            }
             return
         }
 
@@ -935,20 +983,14 @@ class RideInfoOcrService : AccessibilityService() {
             return
         }
 
-        // ===== OCR-only: corrida válida precisa de "R$" + dois valores em KM =====
-        val hasPrice = PRICE_PATTERN.containsMatchIn(sanitizedText)
-        val hasTwoKmValues = RideOcrTextProcessing.hasAtLeastTwoDistanceSignals(
-            text = sanitizedText,
-            kmPattern = KM_VALUE_PATTERN,
-            metersPattern = METERS_VALUE_PATTERN
-        )
+        val appSource = detectAppSource(packageName)
 
-        if (!(hasPrice && hasTwoKmValues)) {
+        if (!hasRequiredOfferTokens(sanitizedText, appSource)) {
             val key = "missing-core-tokens|$packageName|${if (isStateChange) "STATE" else "CONTENT"}"
             if (shouldLogDiagnostic(key)) {
                 Log.d(
                     TAG,
-                    "Ignorado sem tokens obrigatórios OCR-only (R$ + 2x KM). hasPrice=$hasPrice, hasTwoKmValues=$hasTwoKmValues"
+                    "Ignorado sem tokens obrigatórios (app=${appSource.displayName})"
                 )
             }
 
@@ -962,7 +1004,7 @@ class RideInfoOcrService : AccessibilityService() {
             return
         }
 
-        if (!isLikelyRideOffer(sanitizedText, isStateChange)) {
+        if (!isLikelyRideOffer(sanitizedText, isStateChange, appSource)) {
             val key = "low-confidence|$packageName|${if (isStateChange) "STATE" else "CONTENT"}"
             if (shouldLogDiagnostic(key)) {
                 Log.d(TAG, "Ignorado por baixa confiança (${if (isStateChange) "STATE" else "CONTENT"}): ${sanitizedText.take(DEBUG_TEXT_SAMPLE_MAX)}")
@@ -1040,7 +1082,7 @@ class RideInfoOcrService : AccessibilityService() {
         return try {
             val allWindows = windows ?: return ""
             val sb = StringBuilder()
-            val keywordQueries = listOf("R$", "km", "min", "aceitar", "accept", "corrida", "viagem")
+            val keywordQueries = listOf("R$", "$", "km", "min", "aceitar", "accept", "corrida", "viagem")
             val expectedSource = detectAppSource(expectedPackage)
 
             for (window in allWindows) {
@@ -1122,7 +1164,7 @@ class RideInfoOcrService : AccessibilityService() {
         }
     }
 
-    private fun isLikelyRideOffer(text: String, isStateChange: Boolean): Boolean {
+    private fun isLikelyRideOffer(text: String, isStateChange: Boolean, appSource: AppSource = AppSource.UNKNOWN): Boolean {
         // === FAST PATH: Se bater nos padrões específicos de Uber ou 99, ACEITAR direto ===
         if (
             isRecognizedRideCard(text) &&
@@ -1162,7 +1204,13 @@ class RideInfoOcrService : AccessibilityService() {
         // - Se tiver ação explícita (aceitar/recusar etc), aceitar.
         // - Se bater padrão típico de oferta da Uber, aceitar.
         // - Senão, usar limiar de confiança moderado.
-        val accepted = actionCount > 0 || uberLikeOfferPattern || confidence >= if (isStateChange) 3 else 4
+        val threshold = when (appSource) {
+            AppSource.UBER -> if (isStateChange) 2 else 3
+            AppSource.NINETY_NINE -> if (isStateChange) 3 else 4
+            AppSource.UNKNOWN -> if (isStateChange) 3 else 4
+        }
+
+        val accepted = actionCount > 0 || uberLikeOfferPattern || confidence >= threshold
 
         if (!accepted) {
             val key = "confidence-detail|${if (isStateChange) "STATE" else "CONTENT"}|$actionCount|$contextCount|$hasKm|$hasTwoKmValues|$hasExplicitCurrency|$hasPlusPrice|$confidence"
@@ -1203,7 +1251,7 @@ class RideInfoOcrService : AccessibilityService() {
                 val screenHeight = resources.displayMetrics.heightPixels
                 val topThreshold = (screenHeight * TOP_SCREEN_FILTER_FRACTION).toInt()
 
-                val queries = listOf("R$", "km", "min")
+                val queries = listOf("R$", "$", "km", "min")
                 for (query in queries) {
                     val nodes = try { root.findAccessibilityNodeInfosByText(query) } catch (_: Exception) { null } ?: continue
                     for (node in nodes) {
@@ -1232,7 +1280,7 @@ class RideInfoOcrService : AccessibilityService() {
         }
     }
 
-    private fun hasStrongRideSignal(text: String): Boolean {
+    private fun hasStrongRideSignal(text: String, appSource: AppSource = AppSource.UNKNOWN): Boolean {
         if (text.isBlank()) return false
 
         // Se bater nos padrões específicos de Uber ou 99, é sinal forte
@@ -1257,9 +1305,37 @@ class RideInfoOcrService : AccessibilityService() {
             containsAnyIgnoreCase(text, ACTION_KEYWORDS) ||
                 containsAnyIgnoreCase(text, CONTEXT_KEYWORDS)
 
+        if (appSource == AppSource.UBER && hasPrice && (hasTwoDistanceSignals || hasActionContext)) return true
+        if (appSource == AppSource.NINETY_NINE && hasPrice && hasTwoDistanceSignals) return true
+
         if (hasPrice && hasTwoDistanceSignals && hasActionContext) return true
 
         return false
+    }
+
+    private fun hasRequiredOfferTokens(text: String, appSource: AppSource): Boolean {
+        val hasPrice = PRICE_PATTERN.containsMatchIn(text) || FALLBACK_PRICE_PATTERN.containsMatchIn(text)
+        val hasKmToken =
+            KM_VALUE_PATTERN.containsMatchIn(text) ||
+                METERS_VALUE_PATTERN.containsMatchIn(text)
+        val hasMinToken =
+            MIN_VALUE_PATTERN.containsMatchIn(text) ||
+                MIN_RANGE_PATTERN.containsMatchIn(text) ||
+                DURATION_PATTERN.containsMatchIn(text)
+        val hasActionOrContext =
+            containsAnyIgnoreCase(text, ACTION_KEYWORDS) ||
+                containsAnyIgnoreCase(text, CONTEXT_KEYWORDS)
+
+        return when (appSource) {
+            AppSource.NINETY_NINE -> hasPrice && hasKmToken && hasMinToken
+            AppSource.UBER -> hasPrice && (hasKmToken || hasMinToken || hasActionOrContext)
+            AppSource.UNKNOWN ->
+                hasPrice && RideOcrTextProcessing.hasAtLeastTwoDistanceSignals(
+                    text = text,
+                    kmPattern = KM_VALUE_PATTERN,
+                    metersPattern = METERS_VALUE_PATTERN
+                )
+        }
     }
 
     private fun hasVisibleMonitoredWindow(): Boolean {
@@ -2068,12 +2144,19 @@ class RideInfoOcrService : AccessibilityService() {
                                 return
                             }
 
+                            val appSource = detectAppSource(packageName)
+                            val cropStartFraction = if (appSource == AppSource.NINETY_NINE) {
+                                OCR_BOTTOM_HALF_START_FRACTION_99
+                            } else {
+                                OCR_BOTTOM_HALF_START_FRACTION
+                            }
+
                             RideOcrFallbackProcessor.processBitmap(
                                 bitmap = bitmap,
                                 packageName = packageName,
                                 triggerReason = triggerReason,
                                 tag = TAG,
-                                bottomHalfStartFraction = OCR_BOTTOM_HALF_START_FRACTION,
+                                bottomHalfStartFraction = cropStartFraction,
                                 pricePattern = PRICE_PATTERN,
                                 sanitizeText = { raw ->
                                     RideOcrTextProcessing.sanitizeTextForRideParsing(
@@ -2129,7 +2212,6 @@ class RideInfoOcrService : AccessibilityService() {
         val now = System.currentTimeMillis()
         if (now - lastAutoDebugDumpAt < AUTO_DEBUG_DUMP_INTERVAL_MS) return
         lastAutoDebugDumpAt = now
-
         try {
             val allWindows = windows
             val windowsText = extractTextFromInteractiveWindows(packageName)

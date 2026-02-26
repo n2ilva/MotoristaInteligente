@@ -1206,13 +1206,15 @@ class FloatingAnalyticsService : Service() {
             ">>> showAnalysisCard chamado! isCardVisible=$isCardVisible, analysisCard=${if (analysisCard != null) "NÃO NULO" else "NULO"}, attached=$attached"
         )
 
-        // Se o card já está visível, apenas atualizar os dados sem recriar
-        if (isCardVisible && analysisCard != null && attached) {
+        // Se o card já está visível e anexado, apenas atualizar os dados sem recriar
+        if (analysisCard != null && attached) {
             Log.i("FloatingAnalytics", ">>> Atualizando card existente (in-place)")
             populateCard(analysis)
 
-            // Garantir visibilidade caso tenha ficado invisível por animação/estado residual
+            // Cancelar qualquer animação em andamento e garantir visibilidade
+            analysisCard?.animate()?.cancel()
             analysisCard?.visibility = View.VISIBLE
+            analysisCard?.alpha = 1f
             analysisCard?.translationY = 0f
 
             // Piscar brevemente para indicar atualização
@@ -1229,6 +1231,7 @@ class FloatingAnalyticsService : Service() {
             // Resetar timer de auto-ocultar
             handler.removeCallbacks(hideCardRunnable)
             handler.postDelayed(hideCardRunnable, 10000)
+            isCardVisible = true
             return
         }
 
@@ -1348,17 +1351,14 @@ class FloatingAnalyticsService : Service() {
     private fun hideAnalysisCard() {
         handler.removeCallbacks(hideCardRunnable)
         analysisCard?.let { card ->
-            // Animação slide-up de saída (sobe para o topo)
-            card.animate()
-                .translationY(-300f)
-                .alpha(0f)
-                .setDuration(250)
-                .withEndAction {
-                    try {
-                        windowManager.removeView(card)
-                    } catch (_: Exception) { }
+            // Cancelar qualquer animação em andamento para evitar race conditions
+            card.animate().cancel()
+            // Remover imediatamente do WindowManager
+            try {
+                if (card.isAttachedToWindow) {
+                    windowManager.removeView(card)
                 }
-                .start()
+            } catch (_: Exception) { }
         }
         analysisCard = null
         isCardVisible = false

@@ -246,8 +246,8 @@ class DriverPreferences(context: Context) {
     /** Valor mínimo sugerido para aceitar corrida (cobre combustível + margem) */
     fun suggestedMinPricePerKm(avgRideKm: Double = 8.0): Double {
         val fuel = fuelCostPerKm
-        val maintenance = 0.08  // R$0.08/km manutenção estimada
-        val depreciacao = 0.07  // R$0.07/km depreciação estimada
+        val maintenance = 0.15  // R$0.15/km manutenção estimada
+        val depreciacao = 0.12  // R$0.12/km depreciação estimada
         val totalCost = fuel + maintenance + depreciacao
         // Margem de ~50% sobre custo (cobre impostos + lucro)
         return totalCost * 1.5

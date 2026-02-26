@@ -1,6 +1,7 @@
 package com.example.motoristainteligente
 
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
 import android.util.Log
 import com.google.mlkit.vision.common.InputImage
@@ -22,8 +23,9 @@ object RideOcrFallbackProcessor {
         onStrongSignal: (String) -> Unit
     ) {
         try {
+            val softwareBitmap = ensureSoftwareBitmap(bitmap)
             val normalizedStart = bottomHalfStartFraction.coerceIn(0.0, 0.95)
-            val lowerRegionBitmap = cropBottomRegion(bitmap, normalizedStart)
+            val lowerRegionBitmap = ensureSoftwareBitmap(cropBottomRegion(softwareBitmap, normalizedStart))
             val blackAndWhiteBitmap = toBlackAndWhite(lowerRegionBitmap)
 
             val inputImage = InputImage.fromBitmap(blackAndWhiteBitmap, 0)
@@ -65,6 +67,18 @@ object RideOcrFallbackProcessor {
         }
     }
 
+    private fun ensureSoftwareBitmap(bitmap: Bitmap): Bitmap {
+        if (bitmap.config != Bitmap.Config.HARDWARE) return bitmap
+
+        val copied = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+        if (copied != null) return copied
+
+        val safeBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(safeBitmap)
+        canvas.drawBitmap(bitmap, 0f, 0f, null)
+        return safeBitmap
+    }
+
     private fun cropBottomRegion(bitmap: Bitmap, startFraction: Double): Bitmap {
         val yStart = (bitmap.height * startFraction).toInt().coerceIn(0, bitmap.height - 1)
         val cropHeight = (bitmap.height - yStart).coerceAtLeast(1)
@@ -72,10 +86,11 @@ object RideOcrFallbackProcessor {
     }
 
     private fun toBlackAndWhite(bitmap: Bitmap): Bitmap {
+        val safeBitmap = ensureSoftwareBitmap(bitmap)
         val width = bitmap.width
         val height = bitmap.height
         val pixels = IntArray(width * height)
-        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+        safeBitmap.getPixels(pixels, 0, width, 0, 0, width, height)
 
         var luminanceSum = 0L
         for (i in pixels.indices) {

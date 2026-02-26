@@ -36,6 +36,14 @@ object RideInfoRouteParsers {
     ): OcrRoutePairExtraction? {
         val routePairs = routePairPattern.findAll(text).toList()
         val routePairsMeters = routePairMetersPattern.findAll(text).toList()
+        fun extractRouteKm(match: MatchResult): Double? {
+            val kmGroup = when {
+                match.groupValues.getOrNull(3)?.isNotBlank() == true -> match.groupValues[3]
+                match.groupValues.getOrNull(2)?.isNotBlank() == true -> match.groupValues[2]
+                else -> ""
+            }
+            return kmGroup.replace(",", ".").toDoubleOrNull()
+        }
         val parenthesizedKm = kmInParenPattern.findAll(text)
             .mapNotNull { it.groupValues.getOrNull(1)?.replace(",", ".")?.toDoubleOrNull() }
             .filter { it in 0.1..300.0 }
@@ -63,13 +71,13 @@ object RideInfoRouteParsers {
             rideKm = parenthesizedKm[0]
         } else if (routePairsMeters.isNotEmpty() && routePairs.isNotEmpty()) {
             pickupKm = routePairsMeters.first().groupValues[2].toDoubleOrNull()?.div(1000.0)
-            rideKm = routePairs.first().groupValues[2].replace(",", ".").toDoubleOrNull()
+            rideKm = extractRouteKm(routePairs.first())
         } else if (routePairs.size >= 2) {
-            pickupKm = routePairs[0].groupValues[2].replace(",", ".").toDoubleOrNull()
-            rideKm = routePairs[1].groupValues[2].replace(",", ".").toDoubleOrNull()
+            pickupKm = extractRouteKm(routePairs[0])
+            rideKm = extractRouteKm(routePairs[1])
         } else if (parenthesizedKm.size == 1 || routePairs.size == 1) {
             pickupKm = parenthesizedKm.firstOrNull()
-                ?: routePairs.firstOrNull()?.groupValues?.getOrNull(2)?.replace(",", ".")?.toDoubleOrNull()
+                ?: routePairs.firstOrNull()?.let { extractRouteKm(it) }
 
             val tailStart = routePairs.firstOrNull()?.range?.last?.plus(1) ?: 0
             val tail = text.substring(tailStart.coerceAtMost(text.length))
