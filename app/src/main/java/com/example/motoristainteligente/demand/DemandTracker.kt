@@ -121,10 +121,10 @@ object DemandTracker {
     fun recordRideOffer(rideData: RideData) {
         val snapshot = RideSnapshot(
             timestamp = System.currentTimeMillis(),
-            price = rideData.ridePrice,
+            price = rideData.ridePrice.toDouble(),
             distanceKm = rideData.distanceKm,
             estimatedTimeMin = rideData.estimatedTimeMin,
-            pricePerKm = if (rideData.distanceKm > 0) rideData.ridePrice / (rideData.distanceKm + (rideData.pickupDistanceKm ?: 0.0)).coerceAtLeast(0.1) else 0.0,
+            pricePerKm = if (rideData.distanceKm > 0) rideData.ridePrice.toDouble() / (rideData.distanceKm + (rideData.pickupDistanceKm ?: 0.0)).coerceAtLeast(0.1) else 0.0,
             appSource = rideData.appSource
         )
 

@@ -98,7 +98,11 @@ class RideInfoOcrService : AccessibilityService() {
 
         // Padrões de extração de dados
         // Aceita: R$ 15,50 / R$15.50 / $ 15,50 / $15.50 / R$ 8,00 / R$ 125,90 / R$7.5 / R$ 15
-        private val PRICE_PATTERN = Regex("""(?:R?\$)\s*(\d{1,4}(?:[,\.]\d{1,2})?)""")
+        // Ignora multiplicadores como "$1,2~1,8x" / "$1,2x"
+        private val PRICE_PATTERN = Regex(
+            """(?:R\$|\$)\s*(\d{1,4}(?:[,\.]\d{1,2})?)(?!\s*(?:[~\-–]\s*\d{1,4}(?:[,\.]\d{1,2})?)\s*x)(?!\s*x)""",
+            RegexOption.IGNORE_CASE
+        )
         private val KM_IN_PAREN_PATTERN = Regex("""\(\s*(\d{1,3}(?:[,\.]\d+)?)\s*km\s*\)""", RegexOption.IGNORE_CASE)
         // Fallback sem R$: 15,50 / 125.90 (2 casas para evitar conflito com km/min)
         private val FALLBACK_PRICE_PATTERN = Regex("""\b(\d{1,4}[,\.]\d{2})\b""")
@@ -169,11 +173,18 @@ class RideInfoOcrService : AccessibilityService() {
         private val OWN_CARD_MARKERS = listOf(
             "COMPENSA", "NÃO COMPENSA", "NEUTRO",
             "R\$/km", "Ganho/h", "Motorista Inteligente",
-            "Score:"
+            "Score:",
+            "ANÁLISE", "ANALISE",
+            "Média valor/Km", "Media valor/Km",
+            "Média valor/Hora", "Media valor/Hora",
+            "Valor da Corrida"
         )
         private val OWN_CARD_NOISE_TOKENS = listOf(
             "r\$/km", "r\$km", "r\$/min", "r\$/h", "km total",
-            "valor corrida",
+            "valor corrida", "valor da corrida",
+            "media valor/km", "média valor/km",
+            "media valor/hora", "média valor/hora",
+            "analise", "análise",
             "dentro dos seus parâmetros", "dentro dos seus parametros",
             "não compensa", "nao compensa",
             "endereço não disponível", "endereco não disponível",
@@ -296,7 +307,7 @@ class RideInfoOcrService : AccessibilityService() {
         private const val OCR_FALLBACK_ENABLED = true
         private const val OCR_FALLBACK_MIN_INTERVAL_MS = 1200L  // 1.2s entre tentativas OCR
         private const val OCR_BOTTOM_HALF_START_FRACTION = 0.3
-        private const val OCR_BOTTOM_HALF_START_FRACTION_99 = 0.12
+        private const val OCR_BOTTOM_HALF_START_FRACTION_99 = 0.0
 
         // Filtro: ignorar nós de acessibilidade no topo da tela (earnings card Uber)
         private const val TOP_SCREEN_FILTER_FRACTION = 0.15  // 15% superior da tela
@@ -329,6 +340,7 @@ class RideInfoOcrService : AccessibilityService() {
     private var pendingRunnable: Runnable? = null
     private val lastEventLogAt = mutableMapOf<String, Long>()
     private val lastDiagnosticLogAt = mutableMapOf<String, Long>()
+    private val recentOfferFingerprints = LinkedHashMap<String, Long>()
     private var lastAutoDebugDumpAt = 0L
     private var lastOcrFallbackAt = 0L
     // Dedup persistente para node-price-only (earnings card Uber)
@@ -352,6 +364,8 @@ class RideInfoOcrService : AccessibilityService() {
     private var ocrRetryPending = false
     private var pendingOcrRetryRunnable: Runnable? = null
     private var pendingStateOcrRunnable: Runnable? = null
+    private val OFFER_FINGERPRINT_WINDOW_MS = 90_000L
+    private val OFFER_FINGERPRINT_MAX_SIZE = 200
 
     // ========================
     // Detecção de Aceitação de Corrida
@@ -424,6 +438,63 @@ class RideInfoOcrService : AccessibilityService() {
 
     private fun containsAnyIgnoreCase(text: String, keywords: List<String>): Boolean {
         return keywords.any { keyword -> text.contains(keyword, ignoreCase = true) }
+    }
+
+    private fun normalizeAddressForFingerprint(value: String): String {
+        return value
+            .lowercase()
+            .replace(Regex("""\s+"""), " ")
+            .replace(Regex("""[^\p{L}\p{N}\s,.-]"""), "")
+            .trim()
+    }
+
+    private fun buildOfferFingerprint(
+        appSource: AppSource,
+        packageName: String,
+        normalizedPrice: Double,
+        rideDistanceKm: Double,
+        pickupDistanceKm: Double?,
+        pickupAddress: String,
+        dropoffAddress: String
+    ): String {
+        val priceKey = (normalizedPrice * 100).toInt()
+        val rideDistanceKey = (rideDistanceKm * 10).toInt()
+        val pickupDistanceKey = ((pickupDistanceKm ?: -1.0) * 10).toInt()
+        val pickupKey = normalizeAddressForFingerprint(pickupAddress)
+        val dropoffKey = normalizeAddressForFingerprint(dropoffAddress)
+
+        return listOf(
+            appSource.name,
+            packageName,
+            priceKey.toString(),
+            rideDistanceKey.toString(),
+            pickupDistanceKey.toString(),
+            pickupKey,
+            dropoffKey
+        ).joinToString("|")
+    }
+
+    private fun isRecentlySeenOffer(fingerprint: String, now: Long): Boolean {
+        val iterator = recentOfferFingerprints.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (now - entry.value > OFFER_FINGERPRINT_WINDOW_MS) {
+                iterator.remove()
+            }
+        }
+
+        val lastSeen = recentOfferFingerprints[fingerprint]
+        if (lastSeen != null && now - lastSeen < OFFER_FINGERPRINT_WINDOW_MS) {
+            recentOfferFingerprints[fingerprint] = now
+            return true
+        }
+
+        recentOfferFingerprints[fingerprint] = now
+        while (recentOfferFingerprints.size > OFFER_FINGERPRINT_MAX_SIZE) {
+            val firstKey = recentOfferFingerprints.keys.firstOrNull() ?: break
+            recentOfferFingerprints.remove(firstKey)
+        }
+        return false
     }
 
     private fun shouldLogEvent(key: String): Boolean {
@@ -1538,11 +1609,17 @@ class RideInfoOcrService : AccessibilityService() {
         val ocrParsed = parseOcrRoutePairs(text)
 
         if (ocrParsed != null && ocrParsed.price != null) {
-            Log.i(TAG, ">>> Parse OCR route pairs: preço=R$ ${ocrParsed.price}, rideKm=${ocrParsed.rideDistanceKm}, pickupKm=${ocrParsed.pickupDistanceKm ?: "?"}, rating=${ocrParsed.userRating ?: "?"}")
+            val priceForRoutePairs = if (appSource == AppSource.NINETY_NINE && cardPrice != null && cardPrice >= MIN_RIDE_PRICE) {
+                cardPrice
+            } else {
+                ocrParsed.price
+            }
+
+            Log.i(TAG, ">>> Parse OCR route pairs: preço=R$ $priceForRoutePairs, rideKm=${ocrParsed.rideDistanceKm}, pickupKm=${ocrParsed.pickupDistanceKm ?: "?"}, rating=${ocrParsed.userRating ?: "?"}")
             buildAndEmitRideData(
                 appSource = appSource,
                 packageName = packageName,
-                price = ocrParsed.price,
+                price = priceForRoutePairs,
                 rideDistanceKm = ocrParsed.rideDistanceKm,
                 rideTimeMin = null,
                 pickupDistanceKm = ocrParsed.pickupDistanceKm,
@@ -1708,9 +1785,24 @@ class RideInfoOcrService : AccessibilityService() {
         }
         lastDetectedHash = contentHash
 
+        val offerFingerprint = buildOfferFingerprint(
+            appSource = appSource,
+            packageName = packageName,
+            normalizedPrice = normalizedPrice,
+            rideDistanceKm = distance,
+            pickupDistanceKm = pickupDistanceKm,
+            pickupAddress = addresses.first,
+            dropoffAddress = addresses.second
+        )
+
+        if (isRecentlySeenOffer(offerFingerprint, now)) {
+            Log.i(TAG, "Oferta repetida ignorada (janela ${OFFER_FINGERPRINT_WINDOW_MS}ms): R$ $normalizedPrice")
+            return
+        }
+
         val rideData = RideData(
             appSource = appSource,
-            ridePrice = normalizedPrice,
+            ridePrice = normalizedPrice.toFloat(),
             distanceKm = distance,
             estimatedTimeMin = time,
             pickupDistanceKm = pickupDistanceKm,
@@ -2150,6 +2242,7 @@ class RideInfoOcrService : AccessibilityService() {
                             } else {
                                 OCR_BOTTOM_HALF_START_FRACTION
                             }
+                            val useBlackAndWhite = appSource != AppSource.NINETY_NINE
 
                             RideOcrFallbackProcessor.processBitmap(
                                 bitmap = bitmap,
@@ -2157,6 +2250,7 @@ class RideInfoOcrService : AccessibilityService() {
                                 triggerReason = triggerReason,
                                 tag = TAG,
                                 bottomHalfStartFraction = cropStartFraction,
+                                useBlackAndWhite = useBlackAndWhite,
                                 pricePattern = PRICE_PATTERN,
                                 sanitizeText = { raw ->
                                     RideOcrTextProcessing.sanitizeTextForRideParsing(

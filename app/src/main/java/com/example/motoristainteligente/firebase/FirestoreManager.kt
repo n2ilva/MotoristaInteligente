@@ -299,8 +299,9 @@ class FirestoreManager(private val context: Context) {
                 ) { resolvedCity, resolvedNeighborhood ->
                     val hasExtractedAddresses = rideData.pickupAddress.isNotBlank() || rideData.dropoffAddress.isNotBlank()
                     val hasGpsCoordinates = gpsLatitude != null && gpsLongitude != null
+                    val ridePrice = rideData.ridePrice.toDouble()
                     val valuePerKm = if (rideData.distanceKm > 0.0) {
-                        rideData.ridePrice / rideData.distanceKm
+                        ridePrice / rideData.distanceKm
                     } else {
                         0.0
                     }
@@ -314,7 +315,7 @@ class FirestoreManager(private val context: Context) {
                     val data = hashMapOf(
                         "timestamp" to rideData.timestamp,
                         "appSource" to normalizedAppName,
-                        "ridePrice" to rideData.ridePrice,
+                        "ridePrice" to ridePrice,
                         "offerPricePerKm" to valuePerKm,
                         "distanceKm" to rideData.distanceKm,
                         "destinationKm" to rideData.distanceKm,

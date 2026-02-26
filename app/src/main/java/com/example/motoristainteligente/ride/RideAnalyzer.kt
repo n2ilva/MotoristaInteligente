@@ -26,9 +26,10 @@ object RideAnalyzer {
     fun analyze(rideData: RideData, pickupDistanceKm: Double): RideAnalysis {
         // Distância total = corrida + deslocamento até embarque
         val totalDistanceKm = (rideData.distanceKm + pickupDistanceKm).coerceAtLeast(0.1)
+        val ridePrice = rideData.ridePrice.toDouble()
 
         // Preço por km total (dist corrida + dist pickup)
-        val pricePerKm = rideData.ridePrice / totalDistanceKm
+        val pricePerKm = (ridePrice / totalDistanceKm).toFloat()
 
         // Preço efetivo (mesmo cálculo, mantido para compatibilidade)
         val effectivePricePerKm = pricePerKm
@@ -39,15 +40,16 @@ object RideAnalyzer {
             ?: ((pickupDistanceKm / 30.0) * 60) // ~30km/h média urbana
         val totalTimeMin = rideData.estimatedTimeMin + pickupTimeMin
         val earningsPerHour = if (totalTimeMin > 0) {
-            (rideData.ridePrice / totalTimeMin) * 60
+            (ridePrice / totalTimeMin) * 60
         } else 0.0
+        val earningsPerHourFloat = earningsPerHour.toFloat()
 
         // Fator horário
         val timeFactor = getTimeOfDayFactor()
         val adjustedReference = referencePricePerKm / timeFactor
 
         // Recomendação baseada SOMENTE no mínimo de R$/km configurado pelo motorista
-        val recommendation = if (effectivePricePerKm >= referencePricePerKm) {
+        val recommendation = if (effectivePricePerKm.toDouble() >= referencePricePerKm) {
             Recommendation.WORTH_IT
         } else {
             Recommendation.NOT_WORTH_IT
@@ -70,7 +72,7 @@ object RideAnalyzer {
             pricePerKm = pricePerKm,
             effectivePricePerKm = effectivePricePerKm,
             referencePricePerKm = adjustedReference,
-            estimatedEarningsPerHour = earningsPerHour,
+            estimatedEarningsPerHour = earningsPerHourFloat,
             pickupDistanceKm = pickupDistanceKm,
             score = 0,
             recommendation = recommendation,
@@ -89,7 +91,7 @@ object RideAnalyzer {
     }
 
     private fun buildReasons(
-        effectivePricePerKm: Double,
+        effectivePricePerKm: Float,
         earningsPerHour: Double,
         reference: Double,
         exceedsPickup: Boolean = false,
@@ -109,7 +111,7 @@ object RideAnalyzer {
             reasons.add("Corrida longa demais")
         }
 
-        if (effectivePricePerKm < reference) {
+        if (effectivePricePerKm.toDouble() < reference) {
             reasons.add("R$/km abaixo do mínimo")
         }
 

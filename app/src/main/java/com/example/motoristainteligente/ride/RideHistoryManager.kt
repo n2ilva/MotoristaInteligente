@@ -87,11 +87,11 @@ class RideHistoryManager(context: Context) {
         val ride = AcceptedRide(
             timestamp = System.currentTimeMillis(),
             appSource = analysis.rideData.appSource.displayName,
-            price = analysis.rideData.ridePrice,
+            price = analysis.rideData.ridePrice.toDouble(),
             distanceKm = analysis.rideData.distanceKm,
             estimatedTimeMin = analysis.rideData.estimatedTimeMin,
-            pricePerKm = analysis.pricePerKm,
-            earningsPerHour = analysis.estimatedEarningsPerHour,
+            pricePerKm = analysis.pricePerKm.toDouble(),
+            earningsPerHour = analysis.estimatedEarningsPerHour.toDouble(),
             score = analysis.score,
             recommendation = analysis.recommendation.displayText,
             pickupDistanceKm = analysis.pickupDistanceKm

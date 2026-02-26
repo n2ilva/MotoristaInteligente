@@ -43,10 +43,10 @@ fun processRideDetection(
     val analysis = if (isLimitedData) {
         RideAnalysis(
             rideData = context.rideData,
-            pricePerKm = 0.0,
-            effectivePricePerKm = 0.0,
+            pricePerKm = 0.0f,
+            effectivePricePerKm = 0.0f,
             referencePricePerKm = context.minPricePerKmReference,
-            estimatedEarningsPerHour = 0.0,
+            estimatedEarningsPerHour = 0.0f,
             pickupDistanceKm = pickupDistance,
             score = 50,
             recommendation = Recommendation.NEUTRAL,

@@ -11,7 +11,8 @@ fun bindRideAnalysisCard(
 ) {
     val pickupDistance = analysis.pickupDistanceKm
     val totalDistanceKm = (analysis.rideData.distanceKm + pickupDistance).coerceAtLeast(0.1)
-    val valuePerKm = analysis.rideData.ridePrice / totalDistanceKm
+    val ridePrice = analysis.rideData.ridePrice.toDouble()
+    val valuePerKm = ridePrice / totalDistanceKm
     val valuePerHour = analysis.estimatedEarningsPerHour
 
     card.findViewById<TextView>(R.id.tvAppSource).text = "ANÁLISE"
@@ -35,7 +36,7 @@ fun bindRideAnalysisCard(
     }
 
     card.findViewById<TextView>(R.id.tvRideValue).apply {
-        text = String.format("R$ %.2f", analysis.rideData.ridePrice)
+        text = String.format("R$ %.2f", ridePrice)
         setTextColor(recColor)
     }
 

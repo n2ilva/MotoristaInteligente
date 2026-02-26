@@ -52,7 +52,6 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.ElectricCar
 import androidx.compose.material.icons.filled.EvStation
-import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.TrendingDown
 import androidx.compose.material.icons.filled.TrendingFlat
 import androidx.compose.material.icons.filled.TrendingUp
@@ -68,10 +67,8 @@ import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.ArrowDropUp
 import androidx.compose.material.icons.filled.MonetizationOn
 import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Remove
-import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material.icons.filled.Speed
@@ -144,7 +141,6 @@ enum class Screen(val title: String, val icon: ImageVector) {
     HOME("Início", Icons.Default.Home),
     RIDE_SETTINGS("Configurar Corrida", Icons.Default.Settings),
     DEMAND_BY_REGION("Demanda por Região", Icons.Default.Map),
-    HOTSPOTS("Hotspots Próximos", Icons.Default.Explore),
     WEEKLY_COMPARISON("Resumo Semanal", Icons.Default.CalendarMonth),
     PERMISSIONS("Permissões", Icons.Default.Lock),
     TIPS("Dicas de Uso", Icons.Default.Lightbulb),
@@ -198,9 +194,6 @@ class MainActivity : ComponentActivity() {
                 var isServiceRunning by remember {
                     mutableStateOf(FloatingAnalyticsService.instance != null)
                 }
-                var isAnalysisPaused by remember {
-                    mutableStateOf(AnalysisServiceState.isPaused(this@MainActivity))
-                }
                 var lifecycleRefreshTick by remember { mutableStateOf(0) }
 
                 val lifecycleOwner = LocalLifecycleOwner.current
@@ -208,7 +201,6 @@ class MainActivity : ComponentActivity() {
                     val observer = LifecycleEventObserver { _, event ->
                         if (event == Lifecycle.Event.ON_RESUME) {
                             isServiceRunning = FloatingAnalyticsService.instance != null
-                            isAnalysisPaused = AnalysisServiceState.isPaused(this@MainActivity)
                             lifecycleRefreshTick++
                         }
                     }
@@ -223,14 +215,6 @@ class MainActivity : ComponentActivity() {
                                 AnalysisServiceState.isEnabled(this@MainActivity)
                         if (runningNow != isServiceRunning) {
                             isServiceRunning = runningNow
-                            if (!runningNow) {
-                                isAnalysisPaused = false
-                            }
-                        }
-
-                        val pausedNow = AnalysisServiceState.isPaused(this@MainActivity)
-                        if (pausedNow != isAnalysisPaused) {
-                            isAnalysisPaused = pausedNow
                         }
                         delay(350)
                     }
@@ -238,29 +222,19 @@ class MainActivity : ComponentActivity() {
 
                 AppWithDrawer(
                     isServiceRunning = isServiceRunning,
-                    isAnalysisPaused = isAnalysisPaused,
                     refreshTick = lifecycleRefreshTick,
                     onRequestOverlayPermission = { requestOverlayPermission() },
                     onOpenAccessibilitySettings = { openAccessibilitySettings() },
                     onRequestLocationPermission = { requestLocationPermission() },
                     onStartService = {
                         startFloatingService()
-                        AnalysisServiceState.setPaused(this@MainActivity, false)
-                        isAnalysisPaused = false
                         Handler(Looper.getMainLooper()).postDelayed({
                             isServiceRunning = FloatingAnalyticsService.instance != null
                         }, 800)
                     },
                     onStopService = {
                         stopFloatingService()
-                        AnalysisServiceState.setPaused(this@MainActivity, false)
                         isServiceRunning = false
-                        isAnalysisPaused = false
-                    },
-                    onTogglePause = {
-                        val next = !AnalysisServiceState.isPaused(this@MainActivity)
-                        AnalysisServiceState.setPaused(this@MainActivity, next)
-                        isAnalysisPaused = next
                     }
                 )
             }
@@ -341,14 +315,12 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun AppWithDrawer(
     isServiceRunning: Boolean,
-    isAnalysisPaused: Boolean,
     refreshTick: Int,
     onRequestOverlayPermission: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
     onRequestLocationPermission: () -> Unit,
     onStartService: () -> Unit,
-    onStopService: () -> Unit,
-    onTogglePause: () -> Unit
+    onStopService: () -> Unit
 ) {
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -426,10 +398,8 @@ fun AppWithDrawer(
                 when (currentScreen) {
                     Screen.HOME -> HomeScreen(
                         isServiceRunning = isServiceRunning,
-                        isAnalysisPaused = isAnalysisPaused,
                         onStartService = onStartService,
                         onStopService = onStopService,
-                        onTogglePause = onTogglePause,
                         onNavigateToPermissions = { currentScreen = Screen.PERMISSIONS },
                         firestoreManager = firestoreManager
                     )
@@ -439,7 +409,6 @@ fun AppWithDrawer(
                     Screen.DEMAND_BY_REGION -> DemandByRegionScreen(
                         firestoreManager = firestoreManager
                     )
-                    Screen.HOTSPOTS -> HotspotsScreen()
                     Screen.WEEKLY_COMPARISON -> WeeklyComparisonScreen()
                     Screen.PERMISSIONS -> PermissionsScreen(
                         refreshTick = refreshTick,
@@ -542,7 +511,6 @@ fun DrawerContent(
             )
             DrawerMenuItem(Screen.WEEKLY_COMPARISON, currentScreen, onScreenSelected)
             DrawerMenuItem(Screen.DEMAND_BY_REGION, currentScreen, onScreenSelected)
-            DrawerMenuItem(Screen.HOTSPOTS, currentScreen, onScreenSelected)
 
             HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
 
@@ -601,10 +569,8 @@ fun DrawerMenuItem(
 @Composable
 fun HomeScreen(
     isServiceRunning: Boolean,
-    isAnalysisPaused: Boolean,
     onStartService: () -> Unit,
     onStopService: () -> Unit,
-    onTogglePause: () -> Unit,
     onNavigateToPermissions: () -> Unit = {},
     firestoreManager: FirestoreManager? = null
 ) {
@@ -715,16 +681,10 @@ fun HomeScreen(
                 modifier = Modifier.padding(20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Botões de controle lado a lado (energia + pausa/play)
+                // Botão de controle (liga/desliga análise)
                 val powerTrackColor by animateColorAsState(
                     targetValue = if (isServiceRunning) Color(0xFF4CAF50) else Color(0xFF555555),
                     animationSpec = tween(300), label = "powerTrackColor"
-                )
-                val analysisTrackColor by animateColorAsState(
-                    targetValue = if (!isServiceRunning) Color(0xFF616161)
-                    else if (isAnalysisPaused) Color(0xFF555555)
-                    else Color(0xFF4CAF50),
-                    animationSpec = tween(300), label = "analysisTrackColor"
                 )
 
                 Row(
@@ -734,7 +694,7 @@ fun HomeScreen(
                 ) {
                     Box(
                         modifier = Modifier
-                            .weight(1f)
+                            .fillMaxWidth()
                             .height(44.dp)
                             .clip(RoundedCornerShape(22.dp))
                             .background(powerTrackColor)
@@ -767,29 +727,6 @@ fun HomeScreen(
                                 tint = Color.White
                             )
                         }
-                    }
-
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(44.dp)
-                            .clip(RoundedCornerShape(22.dp))
-                            .background(analysisTrackColor)
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null,
-                                enabled = isServiceRunning
-                            ) {
-                                onTogglePause()
-                            },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = if (isAnalysisPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
-                            contentDescription = if (isAnalysisPaused) "Retomar análise" else "Pausar análise",
-                            modifier = Modifier.size(20.dp),
-                            tint = Color.White.copy(alpha = if (isServiceRunning) 1f else 0.8f)
-                        )
                     }
                 }
             }
@@ -1852,9 +1789,8 @@ fun TipsScreen() {
             tips = listOf(
                 "1. Conceda Sobreposição, Acessibilidade e Localização na seção Permissões",
                 "2. Na Home, ative o serviço principal (status Ativado)",
-                "3. Use o botão verde 'Pausar análise' para pausar sem desligar o app",
-                "4. Se estiver pausado, o botão fica cinza com 'Ativar análise'",
-                "5. Abra Uber ou 99 normalmente para iniciar as análises em tempo real"
+                "3. Use o botão de energia para ligar/desligar a análise",
+                "4. Abra Uber ou 99 normalmente para iniciar as análises em tempo real"
             )
         )
 
@@ -1879,10 +1815,9 @@ fun TipsScreen() {
             title = "Botão Flutuante e Status",
             tips = listOf(
                 "Arraste o botão para qualquer posição na tela",
-                "Segure o botão para abrir o card 'Status'",
-                "No Status, use Pausar/Ativar análise sem encerrar o serviço",
-                "Borda do card de análise: verde quando ativa, vermelha quando pausada/desativada",
-                "Borda do botão flutuante segue o mesmo estado (ativo x pausado)"
+                "Toque no botão para abrir a tela principal do app",
+                "Borda do card de análise: verde quando ativa, vermelha quando desativada",
+                "Borda do botão flutuante segue o mesmo estado (ativo x desativado)"
             )
         )
 
@@ -3463,287 +3398,6 @@ fun EmptyStateCard(emoji: String, title: String, subtitle: String) {
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                 textAlign = TextAlign.Center
             )
-        }
-    }
-}
-
-@Composable
-fun HotspotsScreen() {
-    val context = LocalContext.current
-    val locationHelper = remember { LocationHelper(context) }
-    val scope = rememberCoroutineScope()
-
-    var hotspots by remember { mutableStateOf<List<DemandHotspotsService.Hotspot>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(true) }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
-    var selectedFilter by remember { mutableIntStateOf(0) }
-
-    suspend fun loadHotspots() {
-        try {
-            val location = locationHelper.getCurrentLocation()
-            if (location == null) {
-                errorMessage = "Não foi possível obter sua localização. Verifique se o GPS está ativado."
-                hotspots = emptyList()
-                isLoading = false
-                return
-            }
-
-            val service = DemandHotspotsService(context)
-            val results = service.fetchHotspots(location)
-            hotspots = results
-            errorMessage = if (results.isEmpty()) "Nenhum local com demanda encontrado próximo a você." else null
-            isLoading = false
-        } catch (e: Exception) {
-            errorMessage = "Erro ao buscar locais: ${e.message}"
-            hotspots = emptyList()
-            isLoading = false
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        loadHotspots()
-    }
-
-    val filteredHotspots = when (selectedFilter) {
-        1 -> hotspots.filter { it.demandLevel == DemandHotspotsService.DemandLevel.HIGH }
-        2 -> hotspots.filter { it.demandLevel == DemandHotspotsService.DemandLevel.MEDIUM }
-        else -> hotspots
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp)
-    ) {
-        Text(
-            text = "🗺️ Hotspots próximos",
-            fontSize = 22.sp,
-            fontWeight = FontWeight.Bold
-        )
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            text = "Locais próximos com maior chance de demanda",
-            fontSize = 14.sp,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-        )
-        Spacer(modifier = Modifier.height(16.dp))
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            FilterChipButton("Todos", selectedFilter == 0) { selectedFilter = 0 }
-            FilterChipButton("🔥 Alta", selectedFilter == 1) { selectedFilter = 1 }
-            FilterChipButton("⚡ Média", selectedFilter == 2) { selectedFilter = 2 }
-        }
-        Spacer(modifier = Modifier.height(16.dp))
-
-        when {
-            isLoading -> {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 80.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    androidx.compose.material3.CircularProgressIndicator()
-                }
-            }
-            errorMessage != null -> {
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text(text = errorMessage ?: "", textAlign = TextAlign.Center)
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Button(
-                        onClick = {
-                            isLoading = true
-                            errorMessage = null
-                            scope.launch { loadHotspots() }
-                        }
-                    ) {
-                        Text("Tentar novamente")
-                    }
-                }
-            }
-            filteredHotspots.isEmpty() -> {
-                Text(
-                    text = "Nenhum local encontrado com esse filtro.",
-                    fontSize = 14.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                )
-            }
-            else -> {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    DemandSummaryChip(
-                        emoji = "🔥",
-                        label = "Alta",
-                        count = hotspots.count { it.demandLevel == DemandHotspotsService.DemandLevel.HIGH },
-                        color = Color(0xFF4CAF50),
-                        modifier = Modifier.weight(1f)
-                    )
-                    DemandSummaryChip(
-                        emoji = "⚡",
-                        label = "Média",
-                        count = hotspots.count { it.demandLevel == DemandHotspotsService.DemandLevel.MEDIUM },
-                        color = Color(0xFFFF9800),
-                        modifier = Modifier.weight(1f)
-                    )
-                    DemandSummaryChip(
-                        emoji = "📍",
-                        label = "Total",
-                        count = hotspots.size,
-                        color = Color(0xFF2196F3),
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-                Spacer(modifier = Modifier.height(16.dp))
-
-                filteredHotspots.forEachIndexed { index, hotspot ->
-                    HotspotCard(hotspot = hotspot, context = context)
-                    if (index < filteredHotspots.lastIndex) {
-                        Spacer(modifier = Modifier.height(12.dp))
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun FilterChipButton(label: String, isSelected: Boolean, onClick: () -> Unit) {
-    val bgColor by animateColorAsState(
-        targetValue = if (isSelected) Color(0xFFFF6F00) else MaterialTheme.colorScheme.surfaceVariant,
-        animationSpec = tween(200),
-        label = "filterBg"
-    )
-    val textColor = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurface
-
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(20.dp))
-            .background(bgColor)
-            .clickable { onClick() }
-            .padding(horizontal = 16.dp, vertical = 8.dp)
-    ) {
-        Text(text = label, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = textColor)
-    }
-}
-
-@Composable
-fun DemandSummaryChip(emoji: String, label: String, count: Int, color: Color, modifier: Modifier = Modifier) {
-    Card(
-        modifier = modifier,
-        colors = CardDefaults.cardColors(containerColor = color.copy(alpha = 0.1f)),
-        shape = RoundedCornerShape(12.dp)
-    ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(text = emoji, fontSize = 20.sp)
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "$count",
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold,
-                color = color
-            )
-            Text(
-                text = label,
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-            )
-        }
-    }
-}
-
-@Composable
-fun HotspotCard(hotspot: DemandHotspotsService.Hotspot, context: Context) {
-    val demandColor = when (hotspot.demandLevel) {
-        DemandHotspotsService.DemandLevel.HIGH -> Color(0xFF4CAF50)
-        DemandHotspotsService.DemandLevel.MEDIUM -> Color(0xFFFF9800)
-        DemandHotspotsService.DemandLevel.LOW -> Color(0xFF9E9E9E)
-    }
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.Top
-            ) {
-                Row(
-                    modifier = Modifier.weight(1f),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(text = hotspot.categoryIcon, fontSize = 24.sp)
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = hotspot.name,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = hotspot.address,
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-                Spacer(modifier = Modifier.width(8.dp))
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(demandColor.copy(alpha = 0.15f))
-                        .padding(horizontal = 10.dp, vertical = 4.dp)
-                ) {
-                    Text(
-                        text = hotspot.demandLevel.label,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = demandColor
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = String.format("%.1f km • score %d", hotspot.distanceKm, hotspot.demandScore),
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
-                )
-                TextButton(
-                    onClick = {
-                        val mapsUri = Uri.parse("geo:${hotspot.lat},${hotspot.lng}?q=${Uri.encode(hotspot.name)}")
-                        val mapsIntent = Intent(Intent.ACTION_VIEW, mapsUri)
-                        context.startActivity(mapsIntent)
-                    }
-                ) {
-                    Text("Abrir no mapa")
-                }
-            }
         }
     }
 }

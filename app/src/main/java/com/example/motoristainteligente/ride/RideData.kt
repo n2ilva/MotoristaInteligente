@@ -5,7 +5,7 @@ package com.example.motoristainteligente
  */
 data class RideData(
     val appSource: AppSource,
-    val ridePrice: Double,
+    val ridePrice: Float,
     val distanceKm: Double,
     val estimatedTimeMin: Int,
     val pickupDistanceKm: Double? = null,
@@ -32,10 +32,10 @@ enum class AppSource(val displayName: String) {
  */
 data class RideAnalysis(
     val rideData: RideData,
-    val pricePerKm: Double,
-    val effectivePricePerKm: Double,
+    val pricePerKm: Float,
+    val effectivePricePerKm: Float,
     val referencePricePerKm: Double,
-    val estimatedEarningsPerHour: Double,
+    val estimatedEarningsPerHour: Float,
     val pickupDistanceKm: Double,
     val score: Int,
     val recommendation: Recommendation,

@@ -16,6 +16,7 @@ object RideOcrFallbackProcessor {
         triggerReason: String,
         tag: String,
         bottomHalfStartFraction: Double,
+        useBlackAndWhite: Boolean,
         pricePattern: Regex,
         sanitizeText: (String) -> String,
         hasStrongRideSignal: (String) -> Boolean,
@@ -26,16 +27,16 @@ object RideOcrFallbackProcessor {
             val softwareBitmap = ensureSoftwareBitmap(bitmap)
             val normalizedStart = bottomHalfStartFraction.coerceIn(0.0, 0.95)
             val lowerRegionBitmap = ensureSoftwareBitmap(cropBottomRegion(softwareBitmap, normalizedStart))
-            val blackAndWhiteBitmap = toBlackAndWhite(lowerRegionBitmap)
+            val ocrBitmap = if (useBlackAndWhite) toBlackAndWhite(lowerRegionBitmap) else lowerRegionBitmap
 
-            val inputImage = InputImage.fromBitmap(blackAndWhiteBitmap, 0)
+            val inputImage = InputImage.fromBitmap(ocrBitmap, 0)
             val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
             recognizer.process(inputImage)
                 .addOnSuccessListener { visionText ->
                     val rawOcrText = extractBottomHalfOcrText(
                         visionText = visionText,
-                        imageHeight = blackAndWhiteBitmap.height,
+                        imageHeight = ocrBitmap.height,
                         bottomHalfStartFraction = 0.0
                     )
                     val ocrText = sanitizeText(rawOcrText)
