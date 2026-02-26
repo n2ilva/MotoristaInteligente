@@ -148,26 +148,22 @@ enum class Screen(val title: String, val icon: ImageVector) {
     LOGIN("Login", Icons.Default.Person)
 }
 
-private const val HIGH_DEMAND_THRESHOLD_PER_MINUTE = 5.0
-
 private data class DemandTrendUi(
     val color: Color,
     val icon: ImageVector
 )
 
-private fun toOffersPerMinute(offersInWindow: Int): Double = offersInWindow / 30.0
-
-private fun resolveDemandTrendUi(offersPerMinute: Double): DemandTrendUi {
-    val trendColor = when {
-        offersPerMinute > HIGH_DEMAND_THRESHOLD_PER_MINUTE -> Color(0xFF2E7D32)
-        offersPerMinute < HIGH_DEMAND_THRESHOLD_PER_MINUTE -> Color(0xFFD32F2F)
-        else -> Color(0xFF757575)
+private fun resolveDemandTrendUi(trend: FirestoreManager.DemandPeakTrend): DemandTrendUi {
+    val trendColor = when (trend) {
+        FirestoreManager.DemandPeakTrend.RISING -> Color(0xFF2E7D32)
+        FirestoreManager.DemandPeakTrend.FALLING -> Color(0xFFD32F2F)
+        FirestoreManager.DemandPeakTrend.STABLE -> Color(0xFF757575)
     }
 
-    val trendIcon = when {
-        offersPerMinute > HIGH_DEMAND_THRESHOLD_PER_MINUTE -> Icons.Default.TrendingUp
-        offersPerMinute < HIGH_DEMAND_THRESHOLD_PER_MINUTE -> Icons.Default.TrendingDown
-        else -> Icons.Default.TrendingFlat
+    val trendIcon = when (trend) {
+        FirestoreManager.DemandPeakTrend.RISING -> Icons.Default.TrendingUp
+        FirestoreManager.DemandPeakTrend.FALLING -> Icons.Default.TrendingDown
+        FirestoreManager.DemandPeakTrend.STABLE -> Icons.Default.TrendingFlat
     }
 
     return DemandTrendUi(color = trendColor, icon = trendIcon)
@@ -1083,7 +1079,7 @@ fun WeeklyComparisonScreen() {
         )
         Spacer(modifier = Modifier.height(6.dp))
         Text(
-            text = "Visão geral da semana atual com opção de comparar qualquer dia.",
+            text = "Visão geral da semana atual com destaque de demanda por dia.",
             fontSize = 12.sp,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
         )
@@ -1206,23 +1202,6 @@ private data class WeeklyPlatformRow(
     val avgPricePerKm: Double
 )
 
-private data class TrendIndicatorUi(
-    val emoji: String,
-    val color: Color
-)
-
-private fun resolveTrendIndicator(current: Double, previous: Double?): TrendIndicatorUi {
-    if (previous == null || previous <= 0.0 || current <= 0.0) {
-        return TrendIndicatorUi("➖", Color(0xFF757575))
-    }
-
-    return when {
-        current < previous -> TrendIndicatorUi("📉", Color(0xFFF44336))
-        current > previous -> TrendIndicatorUi("📈", Color(0xFF2E7D32))
-        else -> TrendIndicatorUi("➡️", Color(0xFFFF9800))
-    }
-}
-
 private fun formatDayLabel(dayOfWeek: Int): String = when (dayOfWeek) {
     Calendar.SUNDAY -> "Dom"
     Calendar.MONDAY -> "Seg"
@@ -1248,17 +1227,7 @@ private fun WeeklyPlatformCard(
 ) {
     val isDarkBackground = backgroundColor.luminance() < 0.5f
     val contentColor = if (isDarkBackground) Color.White else Color(0xFF212121)
-
-    var compareAKey by remember(rows) { mutableStateOf(rows.lastOrNull()?.dateKey) }
-    var compareBKey by remember(rows) {
-        mutableStateOf(
-            rows.dropLast(1).lastOrNull()?.dateKey
-                ?: rows.lastOrNull()?.dateKey
-        )
-    }
-
-    val compareA = rows.firstOrNull { it.dateKey == compareAKey }
-    val compareB = rows.firstOrNull { it.dateKey == compareBKey }
+    val weeklyOffersAverage = rows.sumOf { it.offers }.toDouble() / 7.0
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -1283,9 +1252,11 @@ private fun WeeklyPlatformCard(
                 )
             } else {
                 rows.forEachIndexed { index, row ->
-                    val prev = rows.getOrNull(index - 1)
-                    val avgTrend = resolveTrendIndicator(row.avgPrice, prev?.avgPrice)
-                    val avgPerKmTrend = resolveTrendIndicator(row.avgPricePerKm, prev?.avgPricePerKm)
+                    val comparisonColor = if (row.offers < weeklyOffersAverage) {
+                        Color(0xFFD32F2F)
+                    } else {
+                        Color(0xFF2E7D32)
+                    }
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1302,7 +1273,7 @@ private fun WeeklyPlatformCard(
                         Text(
                             text = "${row.offers} ofertas",
                             fontSize = 12.sp,
-                            color = contentColor.copy(alpha = 0.75f)
+                            color = comparisonColor
                         )
                     }
 
@@ -1314,14 +1285,14 @@ private fun WeeklyPlatformCard(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "${avgTrend.emoji} Média: ${if (row.avgPrice > 0) String.format("R$ %.2f", row.avgPrice) else "—"}",
+                            text = "Média: ${if (row.avgPrice > 0) String.format("R$ %.2f", row.avgPrice) else "—"}",
                             fontSize = 12.sp,
-                            color = avgTrend.color
+                            color = comparisonColor
                         )
                         Text(
-                            text = "${avgPerKmTrend.emoji} R$/km: ${if (row.avgPricePerKm > 0) String.format("%.2f", row.avgPricePerKm) else "—"}",
+                            text = "R$/km: ${if (row.avgPricePerKm > 0) String.format("%.2f", row.avgPricePerKm) else "—"}",
                             fontSize = 12.sp,
-                            color = avgPerKmTrend.color
+                            color = comparisonColor
                         )
                     }
 
@@ -1331,191 +1302,6 @@ private fun WeeklyPlatformCard(
                         Spacer(modifier = Modifier.height(8.dp))
                     }
                 }
-
-                if (rows.size >= 2) {
-                    Spacer(modifier = Modifier.height(14.dp))
-                    Text(
-                        text = "Comparar dias",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = contentColor
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        DayPickerDropdown(
-                            modifier = Modifier.weight(1f),
-                            label = "Dia A",
-                            options = rows,
-                            selectedKey = compareAKey,
-                            textColor = contentColor,
-                            onSelect = { compareAKey = it }
-                        )
-                        DayPickerDropdown(
-                            modifier = Modifier.weight(1f),
-                            label = "Dia B",
-                            options = rows,
-                            selectedKey = compareBKey,
-                            textColor = contentColor,
-                            onSelect = { compareBKey = it }
-                        )
-                    }
-
-                    if (compareA != null && compareB != null) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            DayMetricsMiniCard(
-                                modifier = Modifier.weight(1f),
-                                label = "Dia A",
-                                row = compareA,
-                                compareWith = compareB
-                            )
-                            DayMetricsMiniCard(
-                                modifier = Modifier.weight(1f),
-                                label = "Dia B",
-                                row = compareB,
-                                compareWith = compareA
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun DayMetricsMiniCard(
-    modifier: Modifier = Modifier,
-    label: String,
-    row: WeeklyPlatformRow,
-    compareWith: WeeklyPlatformRow
-) {
-    @Composable
-    fun metricWithTrend(title: String, current: Double, other: Double, display: String) {
-        val hasComparison = current > 0.0 && other > 0.0
-        val isHigher = hasComparison && current > other
-        val isLower = hasComparison && current < other
-        val trendSymbol = when {
-            isHigher -> "▲"
-            isLower -> "▼"
-            else -> null
-        }
-        val trendColor = when {
-            isHigher -> Color(0xFF2E7D32)
-            isLower -> Color(0xFFD32F2F)
-            else -> Color.Unspecified
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            Text(
-                text = "$title: $display",
-                fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
-            )
-            if (trendSymbol != null) {
-                Text(
-                    text = trendSymbol,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = trendColor,
-                    modifier = Modifier.padding(end = 2.dp)
-                )
-            }
-        }
-    }
-
-    Card(
-        modifier = modifier,
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.55f)
-        ),
-        shape = RoundedCornerShape(10.dp)
-    ) {
-        Column(modifier = Modifier.padding(10.dp)) {
-            Text(
-                text = "$label · ${formatDayLabel(row.dayOfWeek)} ${formatDateKeyToBr(row.dateKey)}",
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            metricWithTrend(
-                title = "Ofertas",
-                current = row.offers.toDouble(),
-                other = compareWith.offers.toDouble(),
-                display = row.offers.toString()
-            )
-            metricWithTrend(
-                title = "Média",
-                current = row.avgPrice,
-                other = compareWith.avgPrice,
-                display = if (row.avgPrice > 0) String.format("R$ %.2f", row.avgPrice) else "—"
-            )
-            metricWithTrend(
-                title = "R$/km",
-                current = row.avgPricePerKm,
-                other = compareWith.avgPricePerKm,
-                display = if (row.avgPricePerKm > 0) String.format("%.2f", row.avgPricePerKm) else "—"
-            )
-        }
-    }
-}
-
-@Composable
-private fun DayPickerDropdown(
-    modifier: Modifier = Modifier,
-    label: String,
-    options: List<WeeklyPlatformRow>,
-    selectedKey: String?,
-    textColor: Color = Color.Black,
-    onSelect: (String) -> Unit
-) {
-    var expanded by remember { mutableStateOf(false) }
-    val selected = options.firstOrNull { it.dateKey == selectedKey } ?: options.lastOrNull()
-
-    Box(modifier = modifier) {
-        OutlinedButton(
-            onClick = { expanded = true },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(
-                text = if (selected != null)
-                    "$label: ${formatDayLabel(selected.dayOfWeek)} ${formatDateKeyToBr(selected.dateKey)}"
-                else
-                    "$label: —",
-                fontSize = 12.sp,
-                color = textColor
-            )
-        }
-
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false }
-        ) {
-            options.forEach { option ->
-                DropdownMenuItem(
-                    text = {
-                        Text("${formatDayLabel(option.dayOfWeek)} ${formatDateKeyToBr(option.dateKey)}")
-                    },
-                    onClick = {
-                        onSelect(option.dateKey)
-                        expanded = false
-                    }
-                )
             }
         }
     }
@@ -1724,9 +1510,9 @@ fun DemandByRegionScreen(firestoreManager: FirestoreManager?) {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             sortedCities.forEachIndexed { cityIndex, city ->
                 val cityMini = miniByCity[city]
-                val offersLast15m = cityMini?.offersLast15m ?: 0
-                val offersPerMinute = toOffersPerMinute(offersLast15m)
-                val cityTrendUi = resolveDemandTrendUi(offersPerMinute)
+                val cityTrendUi = resolveDemandTrendUi(
+                    cityMini?.demandPeakTrend ?: FirestoreManager.DemandPeakTrend.STABLE
+                )
                 val cityRankColor = rankColor(cityIndex, sortedCities.size)
                 val isExpanded = expandedCityCard == city
 
@@ -1791,8 +1577,7 @@ fun DemandByRegionScreen(firestoreManager: FirestoreManager?) {
                                 )
                             } else {
                                 cityMini?.neighborhoods?.forEachIndexed { index, neighborhoodMini ->
-                                    val neighborhoodPerMinute = toOffersPerMinute(neighborhoodMini.offersLast15m)
-                                    val neighborhoodTrendUi = resolveDemandTrendUi(neighborhoodPerMinute)
+                                    val neighborhoodTrendUi = resolveDemandTrendUi(neighborhoodMini.demandPeakTrend)
                                     val neighborhoodRankColor = rankColor(index, cityMini.neighborhoods.size)
                                     val topLabel = when (index) {
                                         0 -> "TOP 1"

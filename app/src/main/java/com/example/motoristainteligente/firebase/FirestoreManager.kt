@@ -1056,7 +1056,11 @@ class FirestoreManager(private val context: Context) {
         val offersLast15m: Int,
         val offersUberLast15m: Int,
         val offers99Last15m: Int,
-        val activeDriversLast15m: Int
+        val activeDriversLast15m: Int,
+        val offersWindow120m: Int = 0,
+        val offersWindow60m: Int = 0,
+        val offersWindow30m: Int = 0,
+        val demandPeakTrend: DemandPeakTrend = DemandPeakTrend.STABLE
     )
 
     data class CityDemandMini(
@@ -1065,25 +1069,59 @@ class FirestoreManager(private val context: Context) {
         val offersUberLast15m: Int,
         val offers99Last15m: Int,
         val activeDriversLast15m: Int,
+        val offersWindow120m: Int = 0,
+        val offersWindow60m: Int = 0,
+        val offersWindow30m: Int = 0,
+        val demandPeakTrend: DemandPeakTrend = DemandPeakTrend.STABLE,
         val neighborhoods: List<NeighborhoodDemandMini>
     )
+
+    enum class DemandPeakTrend {
+        RISING,
+        FALLING,
+        STABLE
+    }
 
     /**
      * Carrega resumo de demanda por cidade/bairro usando somente a base global
      * de ofertas regionais (regional_ride_offers), somando ofertas por cidade e bairro.
      */
     fun loadCityDemandMini(onResult: (List<CityDemandMini>) -> Unit) {
-        val rollingWindowStart = System.currentTimeMillis() - DEMAND_BUCKET_10M_MS
+        val now = System.currentTimeMillis()
+        val window120Start = now - (120 * 60 * 1000L)
+        val window120End = now - (90 * 60 * 1000L)
+        val window60Start = now - (60 * 60 * 1000L)
+        val window60End = now - (30 * 60 * 1000L)
+        val window30Start = now - (30 * 60 * 1000L)
 
         db.collection(COLLECTION_REGIONAL_OFFERS)
-            .whereGreaterThanOrEqualTo("timestamp", rollingWindowStart)
+            .whereGreaterThanOrEqualTo("timestamp", window120Start)
             .get()
             .addOnSuccessListener { offersSnapshot ->
                 data class Totals(
                     var total: Int = 0,
                     var uber: Int = 0,
-                    var ninetyNine: Int = 0
+                    var ninetyNine: Int = 0,
+                    var offersWindow120m: Int = 0,
+                    var offersWindow60m: Int = 0,
+                    var offersWindow30m: Int = 0
                 )
+
+                fun resolveTrend(acc: Totals): DemandPeakTrend {
+                    val isRising = acc.offersWindow120m <= acc.offersWindow60m &&
+                        acc.offersWindow60m <= acc.offersWindow30m &&
+                        (acc.offersWindow120m < acc.offersWindow30m)
+
+                    val isFalling = acc.offersWindow120m >= acc.offersWindow60m &&
+                        acc.offersWindow60m >= acc.offersWindow30m &&
+                        (acc.offersWindow120m > acc.offersWindow30m)
+
+                    return when {
+                        isRising -> DemandPeakTrend.RISING
+                        isFalling -> DemandPeakTrend.FALLING
+                        else -> DemandPeakTrend.STABLE
+                    }
+                }
 
                 val cityTotals = mutableMapOf<String, Totals>()
                 val neighborhoodTotalsByCity = mutableMapOf<String, MutableMap<String, Totals>>()
@@ -1099,16 +1137,35 @@ class FirestoreManager(private val context: Context) {
                     val neighborhood = doc.getString("neighborhood")?.trim().orEmpty()
 
                     val cityAcc = cityTotals.getOrPut(city) { Totals() }
-                    cityAcc.total += 1
-                    if (isUber) cityAcc.uber += 1
-                    if (isNinetyNine) cityAcc.ninetyNine += 1
+                    val timestamp = doc.getLong("timestamp") ?: 0L
+                    if (timestamp in window120Start until window120End) {
+                        cityAcc.offersWindow120m += 1
+                    }
+                    if (timestamp in window60Start until window60End) {
+                        cityAcc.offersWindow60m += 1
+                    }
+                    if (timestamp >= window30Start) {
+                        cityAcc.offersWindow30m += 1
+                        cityAcc.total += 1
+                        if (isUber) cityAcc.uber += 1
+                        if (isNinetyNine) cityAcc.ninetyNine += 1
+                    }
 
                     if (neighborhood.isNotBlank()) {
                         val cityNeighborhoods = neighborhoodTotalsByCity.getOrPut(city) { mutableMapOf() }
                         val neighborhoodAcc = cityNeighborhoods.getOrPut(neighborhood) { Totals() }
-                        neighborhoodAcc.total += 1
-                        if (isUber) neighborhoodAcc.uber += 1
-                        if (isNinetyNine) neighborhoodAcc.ninetyNine += 1
+                        if (timestamp in window120Start until window120End) {
+                            neighborhoodAcc.offersWindow120m += 1
+                        }
+                        if (timestamp in window60Start until window60End) {
+                            neighborhoodAcc.offersWindow60m += 1
+                        }
+                        if (timestamp >= window30Start) {
+                            neighborhoodAcc.offersWindow30m += 1
+                            neighborhoodAcc.total += 1
+                            if (isUber) neighborhoodAcc.uber += 1
+                            if (isNinetyNine) neighborhoodAcc.ninetyNine += 1
+                        }
                     }
                 }
 
@@ -1128,7 +1185,11 @@ class FirestoreManager(private val context: Context) {
                                     offersLast15m = it.value.total,
                                     offersUberLast15m = it.value.uber,
                                     offers99Last15m = it.value.ninetyNine,
-                                    activeDriversLast15m = 0
+                                    activeDriversLast15m = 0,
+                                    offersWindow120m = it.value.offersWindow120m,
+                                    offersWindow60m = it.value.offersWindow60m,
+                                    offersWindow30m = it.value.offersWindow30m,
+                                    demandPeakTrend = resolveTrend(it.value)
                                 )
                             } ?: emptyList()
 
@@ -1138,6 +1199,10 @@ class FirestoreManager(private val context: Context) {
                             offersUberLast15m = cityTotalsValue.uber,
                             offers99Last15m = cityTotalsValue.ninetyNine,
                             activeDriversLast15m = 0,
+                            offersWindow120m = cityTotalsValue.offersWindow120m,
+                            offersWindow60m = cityTotalsValue.offersWindow60m,
+                            offersWindow30m = cityTotalsValue.offersWindow30m,
+                            demandPeakTrend = resolveTrend(cityTotalsValue),
                             neighborhoods = neighborhoods
                         )
                     }

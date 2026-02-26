@@ -9,18 +9,19 @@ fun extractBottomHalfOcrText(
 ): String {
     if (imageHeight <= 0) return visionText.text.orEmpty().trim()
 
-    val yThreshold = (imageHeight * bottomHalfStartFraction).toInt()
+    val yThreshold = (imageHeight * bottomHalfStartFraction.coerceIn(0.0, 0.95)).toInt()
+
     val lines = visionText.textBlocks
-        .filter { block ->
-            val bounds = block.boundingBox ?: return@filter false
+        .flatMap { block -> block.lines }
+        .filter { line ->
+            val bounds = line.boundingBox ?: return@filter false
             bounds.centerY() >= yThreshold
         }
-        .sortedBy { it.boundingBox?.top ?: Int.MAX_VALUE }
-        .flatMap { block ->
-            block.lines
-                .sortedBy { it.boundingBox?.top ?: Int.MAX_VALUE }
-                .map { line -> line.text.orEmpty().trim() }
-        }
+        .sortedWith(
+            compareBy<Text.Line> { it.boundingBox?.top ?: Int.MAX_VALUE }
+                .thenBy { it.boundingBox?.left ?: Int.MAX_VALUE }
+        )
+        .map { line -> line.text.orEmpty().trim() }
         .filter { it.isNotBlank() }
 
     return lines.joinToString("\n").trim()

@@ -9,6 +9,7 @@ object RideOcrAppClassifier {
     private val UBER_CARD_MARKERS = listOf(
         Regex("""\buberx\b""", RegexOption.IGNORE_CASE),
         Regex("""\buber\s*comfort\b""", RegexOption.IGNORE_CASE),
+        Regex("""\bcomfort\b""", RegexOption.IGNORE_CASE),
         Regex("""\buber\s*black\b""", RegexOption.IGNORE_CASE),
         Regex("""\buber\s*flash\b""", RegexOption.IGNORE_CASE),
         Regex("""\buber\s*connect\b""", RegexOption.IGNORE_CASE),
@@ -28,6 +29,23 @@ object RideOcrAppClassifier {
         Regex("""\bperfil\s+premium\b""", RegexOption.IGNORE_CASE),
         Regex("""\b\d+[\.,]?\d*\s*[·\.]\s*\+?\d+\s*corridas\b""", RegexOption.IGNORE_CASE),
         Regex("""\b\+?\d+\s*corridas\b""", RegexOption.IGNORE_CASE)
+    )
+
+    private val UBER_TOP_LINE_MARKERS = listOf(
+        Regex("""\buberx\b""", RegexOption.IGNORE_CASE),
+        Regex("""\bcomfort\b""", RegexOption.IGNORE_CASE)
+    )
+
+    private val UBER_DESTINATION_LINE_MARKER = Regex(
+        """^\s*viagem\b""",
+        RegexOption.IGNORE_CASE
+    )
+
+    private val NINETY_NINE_EXPLICIT_MARKERS = listOf(
+        Regex("""\bpriorit[áa]rio\b""", RegexOption.IGNORE_CASE),
+        Regex("""\bcorrida\s+longa\b""", RegexOption.IGNORE_CASE),
+        Regex("""\btaxa\s+de\s+deslocamento\b""", RegexOption.IGNORE_CASE),
+        Regex("""\bperfil\s+premium\b""", RegexOption.IGNORE_CASE)
     )
 
     fun isMonitoredPackage(
@@ -56,7 +74,32 @@ object RideOcrAppClassifier {
     fun detectAppSourceFromScreenText(text: String): AppSource {
         if (text.isBlank()) return AppSource.UNKNOWN
 
-        val normalized = text.lowercase()
+        val orderedLines = text
+            .lines()
+            .map { it.replace(Regex("""\s+"""), " ").trim() }
+            .filter { it.isNotBlank() }
+
+        val topLines = orderedLines.take(3)
+
+        val hasUberTopMarker = topLines.any { line ->
+            UBER_TOP_LINE_MARKERS.any { marker -> marker.containsMatchIn(line) }
+        }
+        val hasUberDestinationMarker = orderedLines.any { line ->
+            UBER_DESTINATION_LINE_MARKER.containsMatchIn(line)
+        }
+
+        if (hasUberTopMarker && hasUberDestinationMarker) {
+            return AppSource.UBER
+        }
+
+        val hasExplicit99ByLines = orderedLines.any { line ->
+            NINETY_NINE_EXPLICIT_MARKERS.any { marker -> marker.containsMatchIn(line) }
+        }
+        if (hasExplicit99ByLines) {
+            return AppSource.NINETY_NINE
+        }
+
+        val normalized = orderedLines.joinToString("\n").lowercase()
 
         return if (UBER_CARD_MARKERS.any { it.containsMatchIn(normalized) }) {
             AppSource.UBER
