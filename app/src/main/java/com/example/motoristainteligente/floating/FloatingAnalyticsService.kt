@@ -209,7 +209,20 @@ class FloatingAnalyticsService : Service() {
         // Iniciar atualização periódica de localização (a cada 15 min)
         handler.post(locationUpdateRunnable)
 
-        return START_NOT_STICKY
+        return START_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (AnalysisServiceState.isEnabled(this)) {
+            try {
+                val restartIntent = Intent(applicationContext, FloatingAnalyticsService::class.java)
+                startForegroundService(restartIntent)
+                Log.w("FloatingAnalytics", "Serviço removido da task; auto-recuperação acionada")
+            } catch (e: Exception) {
+                Log.w("FloatingAnalytics", "Falha ao tentar auto-recuperar serviço", e)
+            }
+        }
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -386,6 +399,12 @@ class FloatingAnalyticsService : Service() {
             if (AnalysisServiceState.isPaused(this)) return
 
             val now = System.currentTimeMillis()
+
+            // Durante corrida em andamento, não faz sentido alertar ausência de ofertas.
+            if (RideInfoOcrService.isTripInProgress()) {
+                lastOfferReceivedAt = now
+                return
+            }
 
             // Na primeira execução após ir online, inicializa o timer (evita alerta imediato)
             if (lastOfferReceivedAt == 0L) {
@@ -833,6 +852,11 @@ class FloatingAnalyticsService : Service() {
     fun onRideAccepted(appSource: AppSource) {
         handler.post {
             Log.i("FloatingAnalytics", ">>> Corrida ACEITA: ${appSource.displayName}")
+            try {
+                firestoreManager.markLatestRideOfferAsAccepted(appSource)
+            } catch (e: Exception) {
+                Log.w("FloatingAnalytics", "Falha ao marcar oferta aceita no Firestore", e)
+            }
             // Atualizar notificação
             updateNotificationWithStats()
         }

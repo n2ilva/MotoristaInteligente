@@ -141,6 +141,8 @@ enum class Screen(val title: String, val icon: ImageVector) {
     HOME("Início", Icons.Default.Home),
     RIDE_SETTINGS("Configurar Corrida", Icons.Default.Settings),
     DEMAND_BY_REGION("Demanda por Região", Icons.Default.Map),
+    UBER_DAY_HISTORY("Histórico Uber", Icons.Default.History),
+    NINETY_NINE_DAY_HISTORY("Histórico 99", Icons.Default.History),
     WEEKLY_COMPARISON("Resumo Semanal", Icons.Default.CalendarMonth),
     PERMISSIONS("Permissões", Icons.Default.Lock),
     TIPS("Dicas de Uso", Icons.Default.Lightbulb),
@@ -401,12 +403,27 @@ fun AppWithDrawer(
                         onStartService = onStartService,
                         onStopService = onStopService,
                         onNavigateToPermissions = { currentScreen = Screen.PERMISSIONS },
+                        onOpenPlatformHistory = { appSource ->
+                            currentScreen = if (appSource == AppSource.UBER) {
+                                Screen.UBER_DAY_HISTORY
+                            } else {
+                                Screen.NINETY_NINE_DAY_HISTORY
+                            }
+                        },
                         firestoreManager = firestoreManager
                     )
                     Screen.RIDE_SETTINGS -> RideSettingsScreen(
                         firestoreManager = firestoreManager
                     )
                     Screen.DEMAND_BY_REGION -> DemandByRegionScreen(
+                        firestoreManager = firestoreManager
+                    )
+                    Screen.UBER_DAY_HISTORY -> PlatformDayHistoryScreen(
+                        appSource = AppSource.UBER,
+                        firestoreManager = firestoreManager
+                    )
+                    Screen.NINETY_NINE_DAY_HISTORY -> PlatformDayHistoryScreen(
+                        appSource = AppSource.NINETY_NINE,
                         firestoreManager = firestoreManager
                     )
                     Screen.WEEKLY_COMPARISON -> WeeklyComparisonScreen()
@@ -572,6 +589,7 @@ fun HomeScreen(
     onStartService: () -> Unit,
     onStopService: () -> Unit,
     onNavigateToPermissions: () -> Unit = {},
+    onOpenPlatformHistory: (AppSource) -> Unit = {},
     firestoreManager: FirestoreManager? = null
 ) {
     val context = LocalContext.current
@@ -737,6 +755,7 @@ fun HomeScreen(
         // Monitoramento de Demanda (sempre visível — usa Firebase para histórico)
         DemandMonitorCard(
             isServiceRunning = isServiceRunning,
+            onOpenPlatformHistory = onOpenPlatformHistory,
             firestoreManager = firestoreManager
         )
         Spacer(modifier = Modifier.height(24.dp))
@@ -796,14 +815,14 @@ fun HomeScreen(
                 modifier = Modifier.weight(1f),
                 icon = Icons.Default.AttachMoney,
                 title = "Preço/km",
-                description = "Valor da corrida dividido pela distância",
+                description = "Calcula o R$/km com base no valor e rota da oferta",
                 accent = Color(0xFF00C853)
             )
             AnalysisParamCard(
                 modifier = Modifier.weight(1f),
                 icon = Icons.Default.LocalOffer,
-                title = "Preço efetivo",
-                description = "Inclui km até o ponto de embarque",
+                title = "R$/km efetivo",
+                description = "Inclui o deslocamento até o embarque no cálculo real",
                 accent = Color(0xFF2979FF)
             )
         }
@@ -818,14 +837,14 @@ fun HomeScreen(
                 modifier = Modifier.weight(1f),
                 icon = Icons.Default.MonetizationOn,
                 title = "Ganho/hora",
-                description = "Estimativa de quanto ganha por hora",
+                description = "Projeta o ganho por hora com o tempo total estimado",
                 accent = Color(0xFFFF6D00)
             )
             AnalysisParamCard(
                 modifier = Modifier.weight(1f),
                 icon = Icons.Default.DirectionsCar,
                 title = "Embarque",
-                description = "Distância até o passageiro",
+                description = "Considera distância e impacto do pickup na viabilidade",
                 accent = Color(0xFFFF1744)
             )
         }
@@ -840,14 +859,14 @@ fun HomeScreen(
                 modifier = Modifier.weight(1f),
                 icon = Icons.Default.AccessTime,
                 title = "Horário",
-                description = "Bônus em horários de pico e noturno",
+                description = "Ajusta a referência conforme faixa de horário da cidade",
                 accent = Color(0xFFAA00FF)
             )
             AnalysisParamCard(
                 modifier = Modifier.weight(1f),
                 icon = Icons.Default.ShowChart,
                 title = "Demanda",
-                description = "Monitoramento em tempo real da região",
+                description = "Usa dados online da região para sinalizar oportunidades",
                 accent = Color(0xFF00BFA5)
             )
         }
@@ -920,19 +939,19 @@ fun RideSettingsScreen(
                     icon = Icons.Default.AttachMoney,
                     color = Color(0xFF00C853),
                     title = "Preço por km",
-                    description = "Compara o valor da corrida com seu mínimo configurado"
+                    description = "Calcula o R$/km com base no valor e rota da oferta"
                 )
                 FeatureItem(
                     icon = Icons.Default.MonetizationOn,
                     color = Color(0xFFFF6D00),
                     title = "Ganho estimado por hora",
-                    description = "Calcula se a corrida atinge seu objetivo de R$/hora"
+                    description = "Projeta o ganho por hora com o tempo total estimado"
                 )
                 FeatureItem(
                     icon = Icons.Default.DirectionsCar,
                     color = Color(0xFFFF1744),
                     title = "Distância de embarque",
-                    description = "Penaliza corridas onde o passageiro está muito longe"
+                    description = "Considera distância e impacto do pickup na viabilidade"
                 )
                 FeatureItem(
                     icon = Icons.Default.LocalGasStation,
@@ -943,20 +962,20 @@ fun RideSettingsScreen(
                 FeatureItem(
                     icon = Icons.Default.LocalOffer,
                     color = Color(0xFF2979FF),
-                    title = "Preço efetivo",
-                    description = "Desconta o deslocamento vazio até o passageiro do valor real"
+                    title = "R$/km efetivo",
+                    description = "Inclui o deslocamento até o embarque no cálculo real"
                 )
                 FeatureItem(
                     icon = Icons.Default.ShowChart,
                     color = Color(0xFFAA00FF),
                     title = "Demanda em tempo real",
-                    description = "Monitora ofertas por hora e compara com a hora anterior"
+                    description = "Usa dados online da região para sinalizar oportunidades"
                 )
                 FeatureItem(
                     icon = Icons.Default.AccessTime,
                     color = Color(0xFF6D4C41),
-                    title = "Horários de baixa demanda",
-                    description = "Avisa quando é melhor parar e economizar combustível"
+                    title = "Horário",
+                    description = "Ajusta a referência conforme faixa de horário da cidade"
                 )
                 FeatureItem(
                     icon = Icons.Default.Speed,
@@ -2715,6 +2734,7 @@ fun SettingSlider(
 @Composable
 fun DemandMonitorCard(
     isServiceRunning: Boolean = false,
+    onOpenPlatformHistory: (AppSource) -> Unit = {},
     firestoreManager: FirestoreManager? = null
 ) {
     val isGoogleLoggedIn = firestoreManager?.isGoogleUser == true
@@ -2789,6 +2809,73 @@ fun DemandMonitorCard(
 
             // ========== DADOS DO FIREBASE (histórico do dia) ==========
             if (hasFirebaseData) {
+                val totalOffersCombined = (firebaseStats.offersUber + firebaseStats.offers99).coerceAtLeast(0)
+                val avgPriceCombined = if (totalOffersCombined > 0) {
+                    ((firebaseStats.avgPriceUber * firebaseStats.offersUber) +
+                        (firebaseStats.avgPrice99 * firebaseStats.offers99)) / totalOffersCombined
+                } else {
+                    0.0
+                }
+                val avgPricePerKmCombined = if (totalOffersCombined > 0) {
+                    ((firebaseStats.avgPricePerKmUber * firebaseStats.offersUber) +
+                        (firebaseStats.avgPricePerKm99 * firebaseStats.offers99)) / totalOffersCombined
+                } else {
+                    0.0
+                }
+                val avgDistanceCombined = if (totalOffersCombined > 0) {
+                    ((firebaseStats.avgDistanceKmUber * firebaseStats.offersUber) +
+                        (firebaseStats.avgDistanceKm99 * firebaseStats.offers99)) / totalOffersCombined
+                } else {
+                    0.0
+                }
+                val avgTimeCombined = if (totalOffersCombined > 0) {
+                    ((firebaseStats.avgEstimatedTimeMinUber * firebaseStats.offersUber) +
+                        (firebaseStats.avgEstimatedTimeMin99 * firebaseStats.offers99)) / totalOffersCombined
+                } else {
+                    0.0
+                }
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color(0xFF263238)
+                    ),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = "Média geral do dia",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White.copy(alpha = 0.85f),
+                            letterSpacing = 1.sp
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        Text(
+                            text = "${firebaseStats.totalOffersToday} ofertas (Uber + 99)",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        Text(
+                            text = "Preço médio: ${if (avgPriceCombined > 0) String.format("R$ %.2f", avgPriceCombined) else "—"}",
+                            fontSize = 11.sp,
+                            color = Color.White.copy(alpha = 0.9f)
+                        )
+                        Text(
+                            text = "${if (avgPricePerKmCombined > 0) String.format("R$ %.2f/km", avgPricePerKmCombined) else "—/km"} • ${if (avgDistanceCombined > 0) String.format("%.1f km", avgDistanceCombined) else "— km"} • ${if (avgTimeCombined > 0) String.format("%.0f min", avgTimeCombined) else "— min"}",
+                            fontSize = 11.sp,
+                            color = Color(0xFFB0BEC5)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
                 Text(
                     text = "Por plataforma",
                     fontSize = 11.sp,
@@ -2807,6 +2894,8 @@ fun DemandMonitorCard(
                     Box(
                         modifier = Modifier
                             .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { onOpenPlatformHistory(AppSource.UBER) }
                             .background(
                                 Color(0xFF0D1B3D),
                                 RoundedCornerShape(10.dp)
@@ -2865,6 +2954,8 @@ fun DemandMonitorCard(
                     Box(
                         modifier = Modifier
                             .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { onOpenPlatformHistory(AppSource.NINETY_NINE) }
                             .background(
                                 Color(0xFFFFEB3B),
                                 RoundedCornerShape(10.dp)
@@ -2961,6 +3052,182 @@ fun DemandMonitorCard(
                         textAlign = TextAlign.Center
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+fun PlatformDayHistoryScreen(
+    appSource: AppSource,
+    firestoreManager: FirestoreManager? = null
+) {
+    val isGoogleLoggedIn = firestoreManager?.isGoogleUser == true
+
+    var offers by remember(appSource) { mutableStateOf<List<FirestoreManager.RideOfferDetail>>(emptyList()) }
+    var isLoadingOffers by remember(appSource) { mutableStateOf(true) }
+
+    LaunchedEffect(firestoreManager, appSource, isGoogleLoggedIn) {
+        while (true) {
+            if (isGoogleLoggedIn) {
+                firestoreManager?.loadTodayRideOffersByPlatform(appSource) { result ->
+                    offers = result
+                    isLoadingOffers = false
+                }
+            } else {
+                offers = emptyList()
+                isLoadingOffers = false
+            }
+
+            delay(15_000)
+        }
+    }
+
+    val platformLabel = if (appSource == AppSource.UBER) "Uber" else "99"
+    val pendingOffers = offers.filter { !it.isAccepted }
+    val acceptedOffers = offers.filter { it.isAccepted }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp)
+            .verticalScroll(rememberScrollState())
+    ) {
+        Text(
+            text = "Corridas de hoje • $platformLabel",
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Bold
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+            )
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "Ofertas (${pendingOffers.size})",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+
+                if (!isGoogleLoggedIn) {
+                    Text(
+                        text = "Faça login com Google para visualizar as ofertas do dia.",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                    )
+                } else if (isLoadingOffers) {
+                    Text(
+                        text = "Carregando ofertas...",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                    )
+                } else if (offers.isEmpty()) {
+                    Text(
+                        text = "Nenhuma oferta encontrada hoje para $platformLabel.",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                    )
+                } else if (pendingOffers.isEmpty()) {
+                    Text(
+                        text = "Todas as ofertas de hoje foram marcadas como aceitas.",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                    )
+                } else {
+                    pendingOffers.forEachIndexed { index, offer ->
+                        RideOfferHistoryItem(offer = offer, appSource = appSource)
+                        if (index < pendingOffers.lastIndex) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+            )
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "Ofertas aceitas (${acceptedOffers.size})",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+
+                if (acceptedOffers.isEmpty()) {
+                    Text(
+                        text = "Nenhuma oferta aceita hoje para $platformLabel.",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+                    )
+                } else {
+                    acceptedOffers.forEachIndexed { index, offer ->
+                        RideOfferHistoryItem(offer = offer, appSource = appSource)
+                        if (index < acceptedOffers.lastIndex) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RideOfferHistoryItem(
+    offer: FirestoreManager.RideOfferDetail,
+    appSource: AppSource
+) {
+    val cardColor = if (appSource == AppSource.UBER) {
+        Color(0xFF0D1B3D).copy(alpha = 0.95f)
+    } else {
+        Color(0xFFFFEB3B).copy(alpha = 0.95f)
+    }
+
+    val textPrimary = if (appSource == AppSource.UBER) Color.White else Color(0xFF212121)
+    val textSecondary = textPrimary.copy(alpha = 0.78f)
+    val hourText = run {
+        val cal = Calendar.getInstance().apply { timeInMillis = offer.timestamp }
+        String.format("%02d:%02d", cal.get(Calendar.HOUR_OF_DAY), cal.get(Calendar.MINUTE))
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = cardColor),
+        shape = RoundedCornerShape(10.dp)
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+                text = "$hourText • R$ ${String.format("%.2f", offer.ridePrice)}",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = textPrimary
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "${String.format("%.2f", offer.pricePerKm)} R$/km • ${String.format("%.1f", offer.distanceKm)} km • ${offer.estimatedTimeMin} min",
+                fontSize = 12.sp,
+                color = textSecondary
+            )
+            if (offer.pickupDistanceKm > 0.0) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "Pickup: ${String.format("%.1f", offer.pickupDistanceKm)} km",
+                    fontSize = 12.sp,
+                    color = textSecondary
+                )
             }
         }
     }

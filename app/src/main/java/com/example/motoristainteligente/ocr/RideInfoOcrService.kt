@@ -68,6 +68,9 @@ class RideInfoOcrService : AccessibilityService() {
 
     companion object {
         private const val TAG = "RideAccessibility"
+        @Volatile private var tripInProgressGlobal = false
+
+        fun isTripInProgress(): Boolean = tripInProgressGlobal
 
         // Pacotes monitorados - incluir variações conhecidas
         private val UBER_PACKAGES = setOf(
@@ -357,6 +360,8 @@ class RideInfoOcrService : AccessibilityService() {
     // Healthcheck do FloatingAnalyticsService
     private var healthCheckRunnable: Runnable? = null
     private val HEALTH_CHECK_INTERVAL_MS = 30_000L  // Verificar a cada 30s
+    private var lastFloatingRestartAttemptAt = 0L
+    private val FLOATING_RESTART_COOLDOWN_MS = 45_000L
 
     // OCR agressivo quando árvore vazia para apps de corrida
     private var lastEmptyTreeOcrAt = 0L
@@ -505,6 +510,11 @@ class RideInfoOcrService : AccessibilityService() {
         return shouldLogWithThrottle(lastDiagnosticLogAt, key, DIAGNOSTIC_LOG_THROTTLE_MS)
     }
 
+    private fun setTripInProgress(active: Boolean) {
+        tripInProgress = active
+        tripInProgressGlobal = active
+    }
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         isServiceConnected = true
@@ -512,6 +522,7 @@ class RideInfoOcrService : AccessibilityService() {
         Log.i(TAG, "Modo: leitura de tela inteira (detecção por padrões de texto)")
         Log.i(TAG, "FloatingAnalyticsService ativo: ${FloatingAnalyticsService.instance != null}")
         // Iniciar healthcheck periódico do FloatingAnalyticsService
+        ensureFloatingServiceRunning()
         startFloatingServiceHealthCheck()
     }
 
@@ -577,21 +588,26 @@ class RideInfoOcrService : AccessibilityService() {
     }
 
     /**
-     * NÃO inicia o serviço automaticamente.
-     * A análise deve ser ativada apenas por ação manual do usuário na UI.
+     * Mantém o serviço flutuante vivo quando a análise já está ativa.
+     * O início continua manual; aqui só fazemos auto-recuperação.
      */
     private fun ensureFloatingServiceRunning() {
         if (!AnalysisServiceState.isEnabled(this)) {
             return
         }
 
-        if (FloatingAnalyticsService.instance == null &&
-            shouldLogDiagnostic("manual-activation-required")
-        ) {
-            Log.w(
-                TAG,
-                "FloatingAnalyticsService inativo. Ativação automática bloqueada; usuário deve iniciar manualmente."
-            )
+        if (FloatingAnalyticsService.instance != null) return
+
+        val now = System.currentTimeMillis()
+        if (now - lastFloatingRestartAttemptAt < FLOATING_RESTART_COOLDOWN_MS) return
+
+        lastFloatingRestartAttemptAt = now
+        try {
+            val intent = Intent(this, FloatingAnalyticsService::class.java)
+            startForegroundService(intent)
+            Log.w(TAG, "Auto-recuperação: FloatingAnalyticsService reiniciado (análise ativa)")
+        } catch (e: Exception) {
+            Log.e(TAG, "Falha ao auto-reiniciar FloatingAnalyticsService", e)
         }
     }
 
@@ -712,6 +728,7 @@ class RideInfoOcrService : AccessibilityService() {
     override fun onDestroy() {
         super.onDestroy()
         isServiceConnected = false
+        setTripInProgress(false)
         debounceHandler.removeCallbacksAndMessages(null)
         pendingStateOcrRunnable = null
         healthCheckRunnable?.let { debounceHandler.removeCallbacks(it) }
@@ -737,10 +754,10 @@ class RideInfoOcrService : AccessibilityService() {
                     return
                 }
 
-                val instance = FloatingAnalyticsService.instance
-                if (instance == null && shouldLogDiagnostic("healthcheck-manual-only")) {
-                    Log.w(TAG, "HEALTHCHECK: FloatingAnalyticsService inativo (sem auto-restart, modo manual)")
+                if (FloatingAnalyticsService.instance == null && shouldLogDiagnostic("healthcheck-restart")) {
+                    Log.w(TAG, "HEALTHCHECK: FloatingAnalyticsService inativo; tentando auto-recuperação")
                 }
+                ensureFloatingServiceRunning()
                 debounceHandler.postDelayed(this, HEALTH_CHECK_INTERVAL_MS)
             }
         }
@@ -765,7 +782,7 @@ class RideInfoOcrService : AccessibilityService() {
         val rejectionMatch = REJECTION_SIGNALS.any { lower.contains(it) }
         if (rejectionMatch) {
             Log.d(TAG, "✗ Sinal de REJEIÇÃO detectado: '$text' → oferta descartada, resetando cooldowns")
-            tripInProgress = false
+            setTripInProgress(false)
             tripInProgressStartedAt = 0L
             clearOfferState()
             return
@@ -843,7 +860,7 @@ class RideInfoOcrService : AccessibilityService() {
     private fun markOfferAsAccepted(detectionMethod: String, signalText: String) {
         val appSource = lastOfferAppSource ?: return
         lastOfferAlreadyAccepted = true
-        tripInProgress = true
+        setTripInProgress(true)
         tripInProgressStartedAt = System.currentTimeMillis()
 
         // Marcar no DemandTracker
@@ -872,7 +889,7 @@ class RideInfoOcrService : AccessibilityService() {
             lower.contains("procurando corridas")
 
         if (ended) {
-            tripInProgress = false
+            setTripInProgress(false)
             tripInProgressStartedAt = 0L
             Log.d(TAG, "Modo corrida em andamento desativado por sinal de fim/cancelamento")
         }
@@ -884,14 +901,14 @@ class RideInfoOcrService : AccessibilityService() {
         // Se uma nova oferta forte apareceu, sair do modo de supressão imediatamente.
         // Evita ficar "travado" em tripInProgress por falso positivo de aceitação.
         if (hasStrongRideSignal(text)) {
-            tripInProgress = false
+            setTripInProgress(false)
             tripInProgressStartedAt = 0L
             return false
         }
 
         val now = System.currentTimeMillis()
         if (tripInProgressStartedAt > 0L && now - tripInProgressStartedAt > TRIP_MODE_MAX_DURATION_MS) {
-            tripInProgress = false
+            setTripInProgress(false)
             tripInProgressStartedAt = 0L
             return false
         }
@@ -934,7 +951,7 @@ class RideInfoOcrService : AccessibilityService() {
     private fun registerOfferForAcceptanceTracking(appSource: AppSource) {
         // Nova oferta na tela significa que não estamos mais em corrida ativa anterior.
         // Isso evita manter supressão indevida entre ofertas consecutivas.
-        tripInProgress = false
+        setTripInProgress(false)
         tripInProgressStartedAt = 0L
 
         lastOfferAppSource = appSource

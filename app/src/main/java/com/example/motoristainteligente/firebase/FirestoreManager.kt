@@ -58,6 +58,7 @@ class FirestoreManager(private val context: Context) {
     private val auth = FirebaseAuth.getInstance()
     private var lastKnownCityForOffers: String? = null
     private var lastKnownNeighborhoodForOffers: String? = null
+    private val lastRegionalOfferDocIdByApp = mutableMapOf<AppSource, String>()
 
     /** UID do usuário autenticado. Null se não autenticado. */
     val uid: String? get() = auth.currentUser?.uid
@@ -332,7 +333,9 @@ class FirestoreManager(private val context: Context) {
                         "gpsLongitude" to gpsLongitude,
                         "city" to (resolvedCity ?: ""),
                         "neighborhood" to (resolvedNeighborhood ?: ""),
-                        "status" to "online"
+                        "status" to "online",
+                        "isAccepted" to false,
+                        "acceptedAt" to null
                     )
 
                     // Salvar também no escopo GLOBAL para demanda regional agregada (todos os motoristas)
@@ -343,6 +346,7 @@ class FirestoreManager(private val context: Context) {
                     db.collection(COLLECTION_REGIONAL_OFFERS)
                         .add(regionalData)
                         .addOnSuccessListener {
+                            lastRegionalOfferDocIdByApp[normalizedOfferSource] = it.id
                             Log.d(
                                 TAG,
                                 "Oferta regional salva: ${it.id} (R$ ${rideData.ridePrice}, city=${resolvedCity ?: "-"})"
@@ -368,6 +372,80 @@ class FirestoreManager(private val context: Context) {
                 Log.e(TAG, "Falha de autenticação ao salvar oferta", e)
             }
         )
+    }
+
+    fun markLatestRideOfferAsAccepted(appSource: AppSource) {
+        ensureAuthenticated(
+            onReady = { userId ->
+                val lastDocId = lastRegionalOfferDocIdByApp[appSource]
+
+                if (!lastDocId.isNullOrBlank()) {
+                    db.collection(COLLECTION_REGIONAL_OFFERS)
+                        .document(lastDocId)
+                        .set(
+                            mapOf(
+                                "isAccepted" to true,
+                                "acceptedAt" to System.currentTimeMillis(),
+                                "acceptedBy" to "accessibility"
+                            ),
+                            SetOptions.merge()
+                        )
+                        .addOnSuccessListener {
+                            Log.d(TAG, "Oferta regional marcada como aceita (doc direto): $lastDocId")
+                        }
+                        .addOnFailureListener { e ->
+                            Log.w(TAG, "Falha ao marcar doc direto como aceito, tentando fallback por consulta", e)
+                            markLatestRideOfferAsAcceptedByQuery(userId, appSource)
+                        }
+                } else {
+                    markLatestRideOfferAsAcceptedByQuery(userId, appSource)
+                }
+            },
+            onError = { e ->
+                Log.e(TAG, "Falha de autenticação ao marcar oferta aceita", e)
+            }
+        )
+    }
+
+    private fun markLatestRideOfferAsAcceptedByQuery(userId: String, appSource: AppSource) {
+        val appName = appSource.displayName
+        db.collection(COLLECTION_REGIONAL_OFFERS)
+            .whereEqualTo("uid", userId)
+            .whereEqualTo("appSource", appName)
+            .orderBy("timestamp", Query.Direction.DESCENDING)
+            .limit(10)
+            .get()
+            .addOnSuccessListener { snapshot ->
+                val target = snapshot.documents.firstOrNull {
+                    !(it.getBoolean("isAccepted") ?: false)
+                }
+
+                if (target == null) {
+                    Log.w(TAG, "Nenhuma oferta pendente encontrada para marcar como aceita em $appName")
+                    return@addOnSuccessListener
+                }
+
+                db.collection(COLLECTION_REGIONAL_OFFERS)
+                    .document(target.id)
+                    .set(
+                        mapOf(
+                            "isAccepted" to true,
+                            "acceptedAt" to System.currentTimeMillis(),
+                            "acceptedBy" to "accessibility"
+                        ),
+                        SetOptions.merge()
+                    )
+                    .addOnSuccessListener {
+                        lastRegionalOfferDocIdByApp[appSource] = target.id
+                        Log.d(TAG, "Oferta regional marcada como aceita (fallback): ${target.id}")
+                    }
+                    .addOnFailureListener { e ->
+                        Log.e(TAG, "Erro ao atualizar oferta aceita (fallback)", e)
+                    }
+            }
+            .addOnFailureListener { e ->
+                Log.e(TAG, "Erro ao buscar oferta para marcar como aceita", e)
+            }
     }
 
     private fun isValidOfferForFirebase(rideData: RideData): Boolean {
@@ -603,6 +681,17 @@ class FirestoreManager(private val context: Context) {
         val worstPricePerKm: Double = 0.0,
         val lastOfferTimestamp: Long = 0L,
         val loaded: Boolean = false
+    )
+
+    data class RideOfferDetail(
+        val timestamp: Long = 0L,
+        val appSource: AppSource = AppSource.UNKNOWN,
+        val ridePrice: Double = 0.0,
+        val distanceKm: Double = 0.0,
+        val estimatedTimeMin: Int = 0,
+        val pickupDistanceKm: Double = 0.0,
+        val pricePerKm: Double = 0.0,
+        val isAccepted: Boolean = false
     )
 
     data class WeeklyPlatformDayAnalytics(
@@ -915,6 +1004,61 @@ class FirestoreManager(private val context: Context) {
             },
             onError = {
                 onResult(RideOfferStats(loaded = true))
+            }
+        )
+    }
+
+    fun loadTodayRideOffersByPlatform(
+        platform: AppSource,
+        onResult: (List<RideOfferDetail>) -> Unit
+    ) {
+        ensureAuthenticated(
+            onReady = { uid ->
+                val todayStart = todayStartMillis()
+
+                db.collection(COLLECTION_REGIONAL_OFFERS)
+                    .whereGreaterThanOrEqualTo("timestamp", todayStart)
+                    .orderBy("timestamp", Query.Direction.DESCENDING)
+                    .get()
+                    .addOnSuccessListener { snapshot ->
+                        val offers = snapshot.documents.mapNotNull { doc ->
+                            val offerUid = doc.getString("uid") ?: return@mapNotNull null
+                            if (offerUid != uid) return@mapNotNull null
+
+                            val app = doc.getString("appSource") ?: ""
+                            val appSource = resolveAppSource(app)
+                            if (appSource != platform) return@mapNotNull null
+
+                            val timestamp = doc.getLong("timestamp") ?: return@mapNotNull null
+                            val ridePrice = doc.getDouble("ridePrice") ?: 0.0
+                            val distanceKm = doc.getDouble("distanceKm") ?: 0.0
+                            val estimatedTimeMin = doc.getDouble("estimatedTimeMin")?.toInt()
+                                ?: doc.getLong("estimatedTimeMin")?.toInt() ?: 0
+                            val pickupDistanceKm = doc.getDouble("pickupDistanceKm") ?: 0.0
+                            val offerPricePerKm = doc.getDouble("offerPricePerKm")
+                                ?: if (distanceKm > 0) ridePrice / distanceKm else 0.0
+
+                            RideOfferDetail(
+                                timestamp = timestamp,
+                                appSource = appSource,
+                                ridePrice = ridePrice,
+                                distanceKm = distanceKm,
+                                estimatedTimeMin = estimatedTimeMin,
+                                pickupDistanceKm = pickupDistanceKm,
+                                pricePerKm = offerPricePerKm,
+                                isAccepted = doc.getBoolean("isAccepted") ?: false
+                            )
+                        }
+
+                        onResult(offers)
+                    }
+                    .addOnFailureListener { e ->
+                        Log.e(TAG, "Erro ao carregar ofertas detalhadas do dia", e)
+                        onResult(emptyList())
+                    }
+            },
+            onError = {
+                onResult(emptyList())
             }
         )
     }
