@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="300dp"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:background="@drawable/bg_card_main"
+    android:elevation="12dp">
+
+    <RelativeLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="10dp"
+        android:background="@drawable/bg_card_header">
+
+        <TextView
+            android:id="@+id/tvStatusTitle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_alignParentStart="true"
+            android:layout_centerVertical="true"
+            android:text="Status"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/tvSessionTime"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_toStartOf="@+id/btnCloseStatus"
+            android:layout_centerVertical="true"
+            android:layout_marginEnd="8dp"
+            android:text=""
+            android:textColor="#AAFFFFFF"
+            android:textSize="12sp" />
+
+        <ImageView
+            android:id="@+id/btnCloseStatus"
+            android:layout_width="22dp"
+            android:layout_height="22dp"
+            android:layout_alignParentEnd="true"
+            android:layout_centerVertical="true"
+            android:src="@drawable/ic_close"
+            android:contentDescription="Fechar"
+            android:clickable="true"
+            android:focusable="true"
+            android:padding="2dp" />
+    </RelativeLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingStart="14dp"
+        android:paddingEnd="14dp"
+        android:paddingTop="14dp"
+        android:paddingBottom="14dp"
+        android:gravity="center_horizontal">
+
+        <ImageButton
+            android:id="@+id/btnActivateAnalysis"
+            android:layout_width="0dp"
+            android:layout_height="40dp"
+            android:layout_weight="1"
+            android:layout_marginEnd="6dp"
+            android:background="@android:color/transparent"
+            android:src="@drawable/ic_power_settings_new_24"
+            android:scaleType="centerInside"
+            android:contentDescription="Ativar análise"
+            android:tint="#FFFFFF" />
+
+        <ImageButton
+            android:id="@+id/btnPauseAnalysis"
+            android:layout_width="0dp"
+            android:layout_height="40dp"
+            android:layout_weight="1"
+            android:layout_marginStart="6dp"
+            android:background="@android:color/transparent"
+            android:src="@drawable/ic_pause_24"
+            android:scaleType="centerInside"
+            android:contentDescription="Pausar análise"
+            android:tint="#FFFFFF" />
+    </LinearLayout>
+
+</LinearLayout>
